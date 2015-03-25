@@ -95,7 +95,7 @@ class Zip(Package):
                         break
                 # Default to the first one if none found
                 file_name = file_name if file_name else zipinfos[0].filename
-                log.debug("Missing file option, auto executing: {0}".format(file_name))
+                log.debug(u"Missing file option, auto executing: {0}".format(file_name))
             else:
                 raise CuckooPackageError("Empty ZIP archive")
 
