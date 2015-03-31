@@ -632,7 +632,7 @@ class Analyzer:
             # If the analysis target is a file, we choose the package according
             # to the file format.
             if self.config.category == "file":
-                package = choose_package(self.config.file_type, self.config.file_name)
+                package = choose_package(self.config.file_type, self.config.file_name, self.config.exports)
             # If it's an URL, we'll just use the default Internet Explorer
             # package.
             else:
@@ -671,7 +671,7 @@ class Analyzer:
                               "(package={0}): {1}".format(package_name, e))
 
         # Initialize the analysis package.
-        pack = package_class(self.config.get_options())
+        pack = package_class(self.config.get_options(), self.config)
 
         # Initialize Auxiliary modules
         Auxiliary()
