@@ -25,6 +25,52 @@ from lib.cuckoo.common.constants import CUCKOO_VERSION, CUCKOO_ROOT
 from lib.cuckoo.common.utils import store_temp_file, delete_folder
 from lib.cuckoo.core.database import Database, TASK_RUNNING, Task
 
+import logging
+
+has_volatility = False
+try:
+    import volatility.addrspace as addrspace
+    import volatility.conf as conf
+    import volatility.registry as registry
+    import volatility.commands as commands
+    import volatility.plugins.malware.apihooks as apihooks
+    import volatility.plugins.connscan as connscan
+    import volatility.plugins.dlldump as dlldump
+    import volatility.plugins.filescan as filescan
+    import volatility.plugins.malware.impscan as impscan
+    import volatility.plugins.malware.malfind as malfind
+    import volatility.plugins.modscan as modscan
+    import volatility.plugins.procdump as procdump
+    import volatility.plugins.pstree as pstree
+    import volatility.plugins.malware.psxview as psxview
+    import volatility.plugins.ssdt as ssdt
+    import volatility.plugins.malware.svcscan as svcscan
+    import volatility.plugins.taskmods as taskmods
+    import volatility.plugins.overlays.windows.windows as windows
+
+    has_volatility = True
+    # map plugins to module.class to avoid a hard-coded if/else tree 
+    # or one-time use dynamic resolution 
+    VOL_PLUGIN_MAP = {
+        'apihooks': apihooks.ApiHooks,
+        'connscan': connscan.ConnScan,
+        'dlldump' : dlldump.DLLDump,
+        'dlllist' : taskmods.DllList,
+        'filescan': filescan.FileScan,
+        'impscan' : impscan.ImpScan,
+        'malfind' : malfind.Malfind,
+        'modscan' : modscan.ModScan,
+        'procdump': procdump.ProcDump,
+        'pslist'  : taskmods.PSList,
+        'pstree'  : pstree.PSTree, 
+        'psxview' : psxview.PsXview,
+        'ssdt'    : ssdt.SSDT,
+        'svcscan' : svcscan.SvcScan,
+    }
+except ImportError:
+    VOL_PLUGIN_MAP = {}
+    print "[+] Unable to import volatility, volatility api calls will not be available"
+
 # Global DB pointer.
 db = Database()
 
@@ -409,6 +455,56 @@ def task_screenshots(task=0, screenshot=None):
             return zip_data.getvalue()
     else:
         return HTTPError(404, folder_path)
+
+@route("/tasks/volatility/<task:int>/<plugin>", method="POST")
+@route("/v1/tasks/volatility/<task:int>/<plugin>", method="POST")
+def task_volatility(task=0,plugin=None):
+    logbuf = StringIO()
+    logging.basicConfig()
+    if has_volatility:
+
+        folder_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task))
+        out_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task),"volatility")
+        log_path = os.path.join(out_path,"volatility.log")
+        memdmp_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task),"memory.dmp")
+        if not os.path.exists(out_path): os.mkdir(out_path)
+        if os.path.exists(folder_path):
+            registry.PluginImporter()
+            volconfig = conf.ConfObject()
+            registry.register_global_options(volconfig, commands.Command)
+            registry.register_global_options(volconfig, addrspace.BaseAddressSpace)
+            volconfig.PROFILE="WinXPSP2x86"
+            volconfig.LOCATION = "file://%s" % memdmp_path
+
+            for k,v in request.forms.items():
+                    volconfig.update(k,eval(v) if v in ('True','False') else v)
+            if plugin.endswith("dump"):
+                volconfig.OUTPUT_FILE = log_path
+                volconfig.update("dump_dir",out_path)
+                try:
+                    p = VOL_PLUGIN_MAP[plugin](volconfig)
+                    p.execute()
+                    zip_data = StringIO()
+                    with ZipFile(zip_data, "w", ZIP_STORED) as zip_file:
+                        for dump_name in os.listdir(out_path):
+                            zip_file.write(os.path.join(out_path, dump_name), dump_name)
+                    delete_folder(out_path)
+                    response.content_type = "application/zip"
+                    return zip_data.getvalue()
+                except Exception, e:
+                    return jsonize({"exception": "%s: %s" % (Exception,e),"msg" : logbuf.getvalue()})
+                    delete_folder(out_path)
+            elif plugin in VOL_PLUGIN_MAP:
+                p = VOL_PLUGIN_MAP[plugin](volconfig)
+                p.render_text(logbuf,p.calculate())
+                response.content_type = "text/plain"
+                return logbuf.getvalue()
+            else:
+                return HTTPError(404, "Plugin %s not found" % plugin)
+        else:
+            return HTTPError(404, folder_path)
+    else:
+        return HTTPError(404, "Volatility is not available")
 
 application = default_app()
 
