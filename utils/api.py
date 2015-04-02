@@ -461,9 +461,6 @@ def task_screenshots(task=0, screenshot=None):
 def task_volatility(task=0,plugin=None):
     logbuf = StringIO()
     logging.basicConfig()
-    rootlogger = logging.getLogger()
-    h = logging.StreamHandler(logbuf)
-    rootlogger.addHandler(h)
     if has_volatility:
 
         folder_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task))
