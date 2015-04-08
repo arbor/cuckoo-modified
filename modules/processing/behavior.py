@@ -9,7 +9,7 @@ import struct
 
 from lib.cuckoo.common.abstracts import Processing
 from lib.cuckoo.common.config import Config
-from lib.cuckoo.common.netlog import NetlogParser, BsonParser
+from lib.cuckoo.common.netlog import BsonParser
 from lib.cuckoo.common.utils import convert_to_printable, pretty_print_arg, pretty_print_retval, logtime
 
 log = logging.getLogger(__name__)
@@ -63,14 +63,12 @@ class ParseProcessLog(list):
             self.api_call_cache.append(None)
 
     def parse_first_and_reset(self):
-        """ Open file and either init Netlog or Bson Parser. Read till first process
+        """ Open file and init Bson Parser. Read till first process
         """
         self.fd = open(self._log_path, "rb")
 
         if self._log_path.endswith(".bson"):
             self.parser = BsonParser(self)
-        elif self._log_path.endswith(".raw"):
-            self.parser = NetlogParser(self)
         else:
             self.fd.close()
             self.fd = None
@@ -408,6 +406,22 @@ class Summary:
         self.delete_files = []
         self.started_services = []
         self.created_services = []
+        self.executed_commands = []
+
+    def get_argument(self, call, argname, strip=False):
+        for arg in call["arguments"]:
+            if arg["name"] == argname:
+                if strip:
+                    return arg["value"].strip()
+                else:
+                    return arg["value"]
+        return None
+
+    def get_raw_argument(self, call, argname):
+        for arg in call["arguments"]:
+            if arg["name"] == argname:
+                return arg["raw_value"]
+        return None
 
     def event_apicall(self, call, process):
         """Generate processes list from streamed calls/processes.
@@ -415,139 +429,101 @@ class Summary:
         """
 
         if call["api"].startswith("RegOpenKeyEx"):
-            name = None
-            for argument in call["arguments"]:
-                if argument["name"] == "FullName":
-                    name = argument["value"]
+            name = self.get_argument(call, "FullName")
             if name and name not in self.keys:
                 self.keys.append(name)
         elif call["api"].startswith("RegSetValue") or call["api"] == "NtSetValueKey":
-            name = None
-            for argument in call["arguments"]:
-                if argument["name"] == "FullName":
-                    name = argument["value"]
-
+            name = self.get_argument(call, "FullName")
             if name and name not in self.keys:
                self.keys.append(name)
             if name and name not in self.write_keys:
                self.write_keys.append(name)
         elif call["api"] == "NtDeleteValueKey" or call["api"] == "NtDeleteKey" or call["api"].startswith("RegDeleteValue"):
-            name = None
-            for argument in call["arguments"]:
-                if argument["name"] == "FullName":
-                    name = argument["value"]
-
+            name = self.get_argument(call, "FullName")
             if name and name not in self.keys:
                self.keys.append(name)
             if name and name not in self.delete_keys:
                self.delete_keys.append(name)
         elif call["api"].startswith("RegCreateKeyEx"):
-            name = None
-            disposition = 0
-            for argument in call["arguments"]:
-                if argument["name"] == "FullName":
-                    name = argument["value"]
-                elif argument["name"] == "Disposition":
-                    disposition = int(argument["value"], 10)
-
+            name = self.get_argument(call, "FullName")
+            disposition = int(self.get_argument(call, "Disposition"), 10)
             if name and name not in self.keys:
                 self.keys.append(name)
             # if disposition == 1 then we created a new key
             if name and disposition == 1 and name not in self.write_keys:
                self.write_keys.append(name)
         elif call["api"].startswith("NtOpenKey"):
-            name = None
-            for argument in call["arguments"]:
-                if argument["name"] == "ObjectAttributes":
-                    name = argument["value"]
-
+            name = self.get_argument(call, "ObjectAttributes")
             if name and name not in self.keys:
                 self.keys.append(name)
         elif call["api"] == "NtCreateKey":
-            name = None
-            disposition = 0
-            for argument in call["arguments"]:
-                if argument["name"] == "ObjectAttributes":
-                    name = argument["value"]
-                elif argument["name"] == "Disposition":
-                    disposition = int(argument["value"], 10)
-
+            name = self.get_argument(call, "ObjectAttributes")
+            disposition = int(self.get_argument(call, "Disposition"), 10)
             if name and name not in self.keys:
                 self.keys.append(name)
             # if disposition == 1 then we created a new key
             if name and disposition == 1 and name not in self.write_keys:
                self.write_keys.append(name)
         elif call["api"].startswith("RegQueryValue") or call["api"] == "NtQueryValueKey" or call["api"] == "NtQueryMultipleValueKey":
-            name = None
-            for argument in call["arguments"]:
-                if argument["name"] == "FullName":
-                    name = argument["value"]
-
+            name = self.get_argument(call, "FullName")
             if name and name not in self.keys:
                self.keys.append(name)
             if name and name not in self.read_keys:
                self.read_keys.append(name)
         elif call["api"] == "ShellExecuteExW":
-            filename = None
-            for argument in call["arguments"]:
-                if argument["name"] == "FilePath":
-                    filename = argument["value"]
-                    if len(filename) < 2 or filename[1] != ':':
-                        filename = None
+            filename = self.get_argument(call, "FilePath")
+            if len(filename) < 2 or filename[1] != ':':
+                filename = None
             if filename and filename not in self.files:
                 self.files.append(filename)
         elif call["api"] == "NtSetInformationFile":
-            filename = None
-            infoclass = None
-            fileinfo = None
-            for argument in call["arguments"]:
-                if argument["name"] == "HandleName":
-                    filename = argument["value"].strip()
-                elif argument["name"] == "FileInformationClass":
-                    infoclass = int(argument["value"], 10)
-                elif argument["name"] == "FileInformation":
-                    fileinfo = argument["raw_value"]
+            filename = self.get_argument(call, "HandleName")
+            infoclass = int(self.get_argument(call, "FileInformationClass"), 10)
+            fileinfo = self.get_raw_argument(call, "FileInformation")
             if filename and infoclass and infoclass == 13 and fileinfo and len(fileinfo) > 0:
                 disp = struct.unpack_from("B", fileinfo)[0]
                 if disp and filename not in self.delete_files:
                     self.delete_files.append(filename)
 
         elif call["api"].startswith("DeleteFile") or call["api"] == "NtDeleteFile" or call["api"].startswith("RemoveDirectory"):
-            filename = None
-            for argument in call["arguments"]:
-                if argument["name"] == "FileName":
-                    filename = argument["value"].strip()
-                elif argument["name"] == "DirectoryName":
-                    filename = argument["value"].strip()
+            filename = self.get_argument(call, "FileName")
+            if not filename:
+                filename = self.get_argument(call, "DirectoryName")
             if filename:
                 if filename not in self.files:
                     self.files.append(filename)
                 if filename not in self.delete_files:
                     self.delete_files.append(filename)
         elif call["api"].startswith("StartService"):
-            servicename = None
-            for argument in call["arguments"]:
-                if argument["name"] == "ServiceName":
-                    servicename = argument["value"].strip()
+            servicename = self.get_argument(call, "ServiceName", strip=True)
             if servicename and servicename not in self.started_services:
                 self.started_services.append(servicename)
 
         elif call["api"].startswith("CreateService"):
-            servicename = None
-            for argument in call["arguments"]:
-                if argument["name"] == "ServiceName":
-                    servicename = argument["value"].strip()
+            servicename = self.get_argument(call, "ServiceName", strip=True)
             if servicename and servicename not in self.created_services:
                 self.created_services.append(servicename)
 
+        elif call["api"] == "CreateProcessInternalW" or call["api"] == "NtCreateUserProcess":
+            cmdline = self.get_argument(call, "CommandLine", strip=True)
+            if cmdline and cmdline not in self.executed_commands:
+                self.executed_commands.append(cmdline)
+        elif call["api"] == "ShellExecuteExW":
+            path = self.get_argument(call, "FilePath", strip=True)
+            params = self.get_argument(call, "Parameters", strip=True)
+            cmdline = None
+            if path:
+                cmdline = path + " " + params
+            if cmdline and cmdline not in self.executed_commands:
+                self.executed_commands.append(cmdline)
+        elif call["api"].startswith("NtCreateProcess"):
+            cmdline = self.get_argument(call, "FileName")
+            if cmdline and cmdline not in self.executed_commands:
+                self.executed_commands.append(cmdline)
+
         elif call["api"] == "MoveFileWithProgressW":
-            origname = None
-            newname = None
-            for argument in call["arguments"]:
-                if argument["name"] == "ExistingFileName":
-                    origname = argument["value"].strip()
-                elif argument["name"] == "NewFileName":
-                    newname = argument["value"].strip()
+            origname = self.get_argument(call, "ExistingFileName")
+            newname = self.get_argument(call, "NewFileName")
             if origname:
                 if origname not in self.files:
                     self.files.append(origname)
@@ -560,21 +536,15 @@ class Summary:
                     self.write_files.append(newname)
 
         elif call["category"] == "filesystem":
-            filename = None
-            srcfilename = None
-            dstfilename = None
+            filename = self.get_argument(call, "FileName")
+            if not filename:
+                filename = self.get_argument(call, "DirectoryName")
+            srcfilename = self.get_argument(call, "ExistingFileName")
+            dstfilename = self.get_argument(call, "NewFileName")
             access = None
-            for argument in call["arguments"]:
-                if argument["name"] == "FileName":
-                    filename = argument["value"].strip()
-                elif argument["name"] == "DirectoryName":
-                    filename = argument["value"].strip()
-                elif argument["name"] == "ExistingFileName":
-                    srcfilename = argument["value"].strip()
-                elif argument["name"] == "NewFileName":
-                    dstfilename = argument["value"].strip()
-                elif argument["name"] == "DesiredAccess":
-                    access = int(argument["value"], 16)
+            accessval = self.get_argument(call, "DesiredAccess")
+            if accessval:
+                access = int(accessval, 16)
             if filename:
                 if access and (access & 0x80000000 or access & 0x10000000 or access & 0x02000000 or access & 0x1) and filename not in self.read_files:
                     self.read_files.append(filename)
@@ -595,20 +565,15 @@ class Summary:
 
 
         elif call["category"] == "synchronization":
-            for argument in call["arguments"]:
-                if argument["name"] == "MutexName":
-                    value = argument["value"].strip()
-                    if not value:
-                        continue
-
-                    if value not in self.mutexes:
-                        self.mutexes.append(value)
+            value = self.get_argument(call, "MutexName")
+            if value and value not in self.mutexes:
+                self.mutexes.append(value)
 
     def run(self):
         """Get registry keys, mutexes and files.
         @return: Summary of keys, read keys, written keys, mutexes and files.
         """
-        return {"files": self.files, "read_files" : self.read_files, "write_files" : self.write_files, "delete_files" : self.delete_files, "keys": self.keys, "read_keys": self.read_keys, "write_keys": self.write_keys, "delete_keys" : self.delete_keys, "mutexes": self.mutexes, "created_services" : self.created_services, "started_services" : self.started_services }
+        return {"files": self.files, "read_files" : self.read_files, "write_files" : self.write_files, "delete_files" : self.delete_files, "keys": self.keys, "read_keys": self.read_keys, "write_keys": self.write_keys, "delete_keys" : self.delete_keys, "executed_commands" : self.executed_commands, "mutexes": self.mutexes, "created_services" : self.created_services, "started_services" : self.started_services }
 
 class Enhanced(object):
     """Generates a more extensive high-level representation than Summary."""
