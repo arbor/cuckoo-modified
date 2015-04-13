@@ -599,11 +599,12 @@ class Processing(object):
     order = 1
     enabled = True
 
-    def __init__(self):
+    def __init__(self, results=None):
         self.analysis_path = ""
         self.logs_path = ""
         self.task = None
         self.options = None
+        self.results = results
 
     def set_options(self, options):
         """Set report options.
@@ -1044,6 +1045,9 @@ class Signature(object):
                       matched items or the first matched item
         """
 
+        if all:
+            retset = set()
+
         if not "network" in self.results:
             return None
 
@@ -1051,11 +1055,22 @@ class Signature(object):
         if not hosts:
             return None
 
-        return self._check_value(pattern=pattern,
-                                 subject=hosts,
+        for item in hosts:
+            ret = self._check_value(pattern=pattern,
+                                 subject=item["ip"],
                                  regex=regex,
                                  all=all,
                                  ignorecase=False)
+            if ret:
+                if all:
+                    retset.update(ret)
+                else:
+                    return item
+
+        if all and len(retset) > 0:
+            return retset
+
+        return None
 
     def check_domain(self, pattern, regex=False, all=False):
         """Checks for a domain being contacted.
