@@ -467,7 +467,7 @@ def task_volatility(task=0,plugin=None):
 
             for k,v in request.forms.items():
                     volconfig.update(k,eval(v) if v in ('True','False') else v)
-            if plugin.endswith("dump"):
+            if plugin.endswith("dump") or plugin == 'malfind':
                 volconfig.OUTPUT_FILE = log_path
                 volconfig.update("dump_dir",out_path)
                 try:
