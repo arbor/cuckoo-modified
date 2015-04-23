@@ -1,9 +1,12 @@
-# Copyright (C) 2010-2015 Cuckoo Foundation.
+# Copyright (C) 2010-2015 Cuckoo Foundation, Accuvant, Inc. (bspengler@accuvant.com)
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
 import os.path
-import re
+try:
+    import re2 as re
+except ImportError:
+    import re
 
 from lib.cuckoo.common.abstracts import Processing
 from lib.cuckoo.common.exceptions import CuckooProcessingError
@@ -26,7 +29,19 @@ class Strings(Processing):
                 data = open(self.file_path, "r").read()
             except (IOError, OSError) as e:
                 raise CuckooProcessingError("Error opening file %s" % e)
-            strings = re.findall("[\x1f-\x7e]{6,}", data)
-            strings += [str(ws.decode("utf-16le")) for ws in re.findall("(?:[\x1f-\x7e][\x00]){6,}", data)]
+
+            nulltermonly = self.options.get("nullterminated_only", True)
+            minchars = self.options.get("minchars", 5)
+
+            if nulltermonly:
+                apat = "([\x20-\x7e]{" + str(minchars) + ",})\x00"
+                strings = re.findall(apat, data)
+                upat = "((?:[\x20-\x7e][\x00]){" + str(minchars) + ",})\x00\x00"
+                strings += [str(ws.decode("utf-16le")) for ws in re.findall(upat, data)]
+            else:
+                apat = "([\x20-\x7e]{" + str(minchars) + ",})\x00"
+                strings = re.findall(apat, data)
+                upat = "(?:[\x20-\x7e][\x00]){" + str(minchars) + ",}"
+                strings += [str(ws.decode("utf-16le")) for ws in re.findall(upat, data)]
 
         return strings

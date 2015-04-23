@@ -147,9 +147,13 @@
     <Compile Include="lib\cuckoo\common\peepdf\__init__.py" />
     <Compile Include="lib\__init__.py" />
     <Compile Include="modules\auxiliary\tor.py" />
+    <Compile Include="modules\feeds\bad_ssl_certs.py" />
+    <Compile Include="modules\feeds\__init__.py" />
     <Compile Include="modules\processing\suricata.py" />
     <Compile Include="modules\processing\cif.py" />
     <Compile Include="modules\reporting\moloch.py" />
+    <Compile Include="modules\reporting\reporthtmlsummary.py" />
+    <Compile Include="modules\reporting\reportpdf.py" />
     <Compile Include="modules\reporting\resubmitexe.py">
       <SubType>Code</SubType>
     </Compile>
@@ -171,6 +175,7 @@
     <Compile Include="utils\db_migration\versions\from_1_2_to_1_2-accuvant-add_statistics.py">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="utils\dist.py" />
     <Compile Include="utils\health_statistics.py" />
     <Compile Include="utils\process.py" />
     <Compile Include="utils\stats.py" />
@@ -330,6 +335,7 @@
     <Content Include="web\templates\analysis\behavior\_api_call.html" />
     <Content Include="web\templates\analysis\behavior\_search.html" />
     <Content Include="web\templates\analysis\behavior\_search_results.html" />
+    <Content Include="web\templates\analysis\reports\index.html" />
     <Content Include="web\templates\analysis\network\_suricata_alerts.html" />
     <Content Include="web\templates\analysis\network\_suricata_files.html" />
     <Content Include="web\templates\analysis\network\_suricata_http.html" />
@@ -338,12 +344,14 @@
     <Content Include="web\templates\analysis\network\_tcp.html" />
     <Content Include="web\templates\analysis\procmemory\index.html" />
     <Content Include="web\templates\analysis\static\_pdf.html" />
+    <Content Include="web\templates\api\index.html" />
     <Content Include="web\templates\base.html" />
     <Content Include="web\templates\error.html" />
     <Content Include="web\templates\footer.html" />
     <Content Include="web\templates\header.html" />
     <Content Include="web\templates\submission\complete.html" />
     <Content Include="web\templates\submission\status.html" />
+    <Content Include="web\templates\success_simple.html" />
     <Content Include="web\templates\success.html" />
     <Compile Include="web\web\headers.py" />
     <Compile Include="web\web\local_settings.py" />
@@ -464,6 +472,7 @@
     <Folder Include="lib\maec" />
     <Folder Include="modules" />
     <Folder Include="modules\auxiliary" />
+    <Folder Include="modules\feeds\" />
     <Folder Include="modules\machinery" />
     <Folder Include="modules\processing" />
     <Folder Include="modules\reporting" />
@@ -489,11 +498,13 @@
     <Folder Include="web\templates\analysis\admin" />
     <Folder Include="web\templates\analysis\behavior" />
     <Folder Include="web\templates\analysis\dropped" />
+    <Folder Include="web\templates\analysis\reports\" />
     <Folder Include="web\templates\analysis\memory" />
     <Folder Include="web\templates\analysis\network" />
     <Folder Include="web\templates\analysis\overview" />
     <Folder Include="web\templates\analysis\procmemory\" />
     <Folder Include="web\templates\analysis\static" />
+    <Folder Include="web\templates\api\" />
     <Folder Include="web\templates\dashboard" />
     <Folder Include="web\templates\submission" />
     <Folder Include="web\web" />

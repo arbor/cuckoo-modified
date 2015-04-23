@@ -249,7 +249,7 @@ def submit():
         return template.render({"error": "The server encountered an internal error while submitting {0}".format(data.filename.decode("utf-8"))})
 
 @route("/view/<task_id>/download")
-def downlaod_report(task_id):
+def download_report(task_id):
     if not task_id.isdigit():
         return HTTPError(code=404, output="The specified ID is invalid")
 
@@ -273,7 +273,7 @@ def view(task_id):
     if not os.path.exists(report_path):
         return HTTPError(code=404, output="Report not found")
 
-    return open(report_path, "rb").read().replace("<!-- BOTTLEREMOVEME", "").replace("BOTTLEREMOVEME --!>", "")
+    return open(report_path, "rb").read().replace("<!-- BOTTLEREMOVEME", "").replace("BOTTLEREMOVEME -->", "")
 
 @route("/pcap/<task_id>")
 def get_pcap(task_id):

@@ -3,13 +3,21 @@
 # See the file 'docs/LICENSE' for copying permission.
 
 import os
-import re
+import requests
+import datetime
+import threading
 import logging
 import time
 
+try:
+    import re2 as re
+except ImportError:
+    import re
+    
 import xml.etree.ElementTree as ET
 
 from lib.cuckoo.common.config import Config
+from lib.cuckoo.common.constants import CUCKOO_ROOT
 from lib.cuckoo.common.exceptions import CuckooCriticalError
 from lib.cuckoo.common.exceptions import CuckooMachineError
 from lib.cuckoo.common.exceptions import CuckooOperationalError
@@ -1298,3 +1306,73 @@ class Report(object):
         @raise NotImplementedError: this method is abstract.
         """
         raise NotImplementedError
+
+class Feed(object):
+    """Base abstract class for feeds."""
+    name = ""
+
+    def __init__(self):
+        self.data = ""
+        self.downloaddata = ""
+        self.downloadurl = ""
+        self.feedname = ""
+        self.feedpath = ""
+        # default to once per day
+        self.frequency = 24
+        self.updatefeed = False
+
+    def update(self):
+        """Determine if the feed needs to be updated based on the configured
+        frequency and update if it we have passed that time threshold.
+        """
+        self.feedpath = CUCKOO_ROOT + "/data/feeds/" + self.feedname + ".feed"
+        freq = self.frequency * 3600
+        # Check if feed file exists
+        mtime = 0
+        if os.path.isfile(self.feedpath):
+            mtime = os.path.getmtime(self.feedpath)
+            # Check if feed file is older than configured update frequency
+            if time.time() - mtime > freq:
+                self.updatefeed = True
+            else:
+                self.updatefeed = False
+        else:
+            self.updatefeed = True
+
+        if self.updatefeed:
+            headers = dict()
+            if mtime:
+                timestr = datetime.datetime.utcfromtimestamp(mtime).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                headers["If-Modified-Since"] = timestr
+            try:
+                req = requests.get(self.downloadurl, headers=headers, verify=True)
+            except requests.exceptions.RequestException as e:
+                log.warn("Error downloading feed for {0} : {1}".format(self.feedname, e))
+                return False
+            if req.status_code == 200:
+                self.downloaddata = req.content
+                return True
+
+        return False
+
+    def get_feedpath(self):
+        return self.feedpath
+
+    def modify(self):
+        """Modify data before saving it to the feed file.
+        @raise NotImplementedError: this method is abstract.
+        """
+        raise NotImplementedError
+
+    def run(self, modified=False):
+        if self.updatefeed:
+            lock = threading.Lock()
+            with lock:
+                if modified and self.data:
+                    with open(self.feedpath, "w") as feedfile:
+                        feedfile.write(self.data)
+                elif self.downloaddata:
+                    with open(self.feedpath, "w") as feedfile:
+                        feedfile.write(self.downloaddata)
+        return
+

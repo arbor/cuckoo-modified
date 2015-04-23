@@ -168,6 +168,17 @@
     <div class="section-title">
         <h4>Processes</h4>
     </div>
+    {% if summary_report %}
+        {% if results.behavior and results.behavior.processes %}
+            {% for process in results.behavior.processes %}
+                <div>
+                    <h4>{{process.process_name}} <small>PID: {{process.process_id}}, Parent PID: {{process.parent_id}}</small></h4>
+                </div>
+            {% endfor %}
+        {% else %}
+            Nothing to display.
+        {% endif %}
+    {% else %}
     <p>
         <span class="badge registry" style="color: black;">registry</span>
         <span class="badge filesystem" style="color: black;">filesystem</span>
@@ -199,7 +210,7 @@
                         <td>{{call.timestamp[11:]}}</td>
                         <td>{{call.thread_id}}</td>
                         <td><span class="mono">{{call.api}}</span></td>
-                        <td style="word-wrap: break-word">
+                        <td style="word-wrap: break-word;">
                         {% for argument in call.arguments %}
                             {% if argument.pretty_value %}
                                 {{argument.name}} => <span class="mono">{{argument.pretty_value}}</span><br />
@@ -210,7 +221,7 @@
                         </td>
                         <td>{% if call.status %}SUCCESS{% else %}FAILURE{% endif %}</td>
                         {% if call.pretty_return %}
-                            <td style="word-wrap: break-word">{{call.pretty_return}}</td>
+                            <td style="word-wrap: break-word;">{{call.pretty_return}}</td>
                         {% else %}
                             <td>{{call.return}}</td>
                         {% endif %}
@@ -232,5 +243,6 @@
         {% endfor %}
     {% else %}
         Nothing to display.
+    {% endif %}
     {% endif %}
 </section>

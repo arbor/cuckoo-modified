@@ -3,7 +3,12 @@
 # See the file 'docs/LICENSE' for copying permission.
 
 import sys
-import re
+
+try:
+    import re2 as re
+except ImportError:
+    import re
+
 import os
 import json
 
@@ -22,6 +27,7 @@ from urllib import quote
 sys.path.append(settings.CUCKOO_PATH)
 
 from lib.cuckoo.core.database import Database, TASK_PENDING
+from lib.cuckoo.common.config import Config
 from lib.cuckoo.common.constants import CUCKOO_ROOT
 import modules.processing.network as network
 
@@ -29,6 +35,7 @@ results_db = pymongo.MongoClient(settings.MONGO_HOST, settings.MONGO_PORT)[setti
 fs = GridFS(results_db)
 
 TASK_LIMIT = 25
+repconf = Config("reporting")
 
 @require_safe
 def index(request, page=1):
@@ -316,9 +323,20 @@ def report(request, task_id):
         domainlookups = dict()
         iplookups = dict()
 
+    conf = repconf.get_config()
+    enabledconf = dict()
+    for item in conf:
+        if conf[item]["enabled"] == "yes":
+            enabledconf[item] = True
+        else:
+            enabledconf[item] = False
+
     return render_to_response("analysis/report.html",
-                              {"analysis": report, "domainlookups": domainlookups, "iplookups": iplookups},
-                              context_instance=RequestContext(request))
+                             {"analysis": report,
+                              "domainlookups": domainlookups,
+                              "iplookups": iplookups,
+                              "config": enabledconf},
+                             context_instance=RequestContext(request))
 
 @require_safe
 def file(request, category, object_id):
@@ -350,6 +368,31 @@ def file(request, category, object_id):
                                   {"error": "File not found"},
                                   context_instance=RequestContext(request))
 
+@require_safe
+def filereport(request, task_id, category):
+    formats = {
+        "json": "report.json",
+        "html": "report.html",
+        "htmlsummary": "summary-report.html",
+        "pdf": "report.pdf",
+        "maec": "report.maec-1.1.xml",
+        "metadata": "report.metadata.xml",
+    }
+
+    if category in formats:
+        file_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id), "reports", formats[category])
+        file_name = str(task_id) + "_" + formats[category]
+        content_type = "application/octet-stream"
+
+        if os.path.exists(file_path):
+            response = HttpResponse(open(file_path, "rb").read(), content_type=content_type)
+            response["Content-Disposition"] = "attachment; filename={0}".format(file_name)
+
+            return response
+
+    return render_to_response("error.html",
+                              {"error": "File not found"},
+                              context_instance=RequestContext(request))
 
 @require_safe
 def full_memory_dump_file(request, analysis_number):
@@ -400,6 +443,8 @@ def search(request):
                 records = results_db.analysis.find({"target.file.crc32": value}).sort([["_id", -1]])
             elif term == "file":
                 records = results_db.analysis.find({"behavior.summary.files": {"$regex": value, "$options": "-i"}}).sort([["_id", -1]])
+            elif term == "command":
+                records = results_db.analysis.find({"behavior.summary.executed_commands": {"$regex": value, "$options": "-i"}}).sort([["_id", -1]])
             elif term == "key":
                 records = results_db.analysis.find({"behavior.summary.keys": {"$regex": value, "$options": "-i"}}).sort([["_id", -1]])
             elif term == "mutex":
@@ -410,16 +455,18 @@ def search(request):
                 records = results_db.analysis.find({"network.hosts.ip": value}).sort([["_id", -1]])
             elif term == "signature":
                 records = results_db.analysis.find({"signatures.description": {"$regex": value, "$options": "-i"}}).sort([["_id", -1]])
+            elif term == "signame":
+                records = results_db.analysis.find({"signatures.name": {"$regex": value, "$options": "-i"}}).sort([["_id", -1]])
             elif term == "url":
                 records = results_db.analysis.find({"target.url": value}).sort([["_id", -1]])
             elif term == "imphash":
                 records = results_db.analysis.find({"static.pe_imphash": value}).sort([["_id", -1]])
             elif term == "surialert":
-                records = results_db.analysis.find({"suricata.alerts": {"$regex" : value, "$options" : "-1"}}).sort([["_id", -1]])
+                records = results_db.analysis.find({"suricata.alerts.signature": {"$regex" : value, "$options" : "-i"}}).sort([["_id", -1]])
             elif term == "surihttp":
-                records = results_db.analysis.find({"suricata.http": {"$regex" : value, "$options" : "-1"}}).sort([["_id", -1]])
+                records = results_db.analysis.find({"suricata.http": {"$regex" : value, "$options" : "-i"}}).sort([["_id", -1]])
             elif term == "suritls":
-                records = results_db.analysis.find({"suricata.tls": {"$regex" : value, "$options" : "-1"}}).sort([["_id", -1]])
+                records = results_db.analysis.find({"suricata.tls": {"$regex" : value, "$options" : "-i"}}).sort([["_id", -1]])
             elif term == "clamav":
                 records = results_db.analysis.find({"target.file.clamav": {"$regex": value, "$options": "-i"}}).sort([["_id", -1]])
             elif term == "yaraname":
@@ -507,11 +554,16 @@ def remove(request, task_id):
     """Remove an analysis.
     @todo: remove folder from storage.
     """
-    anals = results_db.analysis.find({"info.id": int(task_id)})
-    # Only one analysis found, proceed.
-    if anals.count() == 1:
+    analyses = results_db.analysis.find({"info.id": int(task_id)})
+    # Checks if more analysis found with the same ID, like if process.py was run manually.
+    if analyses.count() > 1:
+        message = "Multiple tasks with this ID deleted."
+    elif analyses.count() == 1:
+        message = "Task deleted."
+
+    if analyses.count() > 0:
         # Delete dups too.
-        for analysis in anals:
+        for analysis in analyses:
             # Delete sample if not used.
             if results_db.analysis.find({"target.file_id": ObjectId(analysis["target"]["file_id"])}).count() == 1:
                 fs.delete(ObjectId(analysis["target"]["file_id"]))
@@ -532,22 +584,17 @@ def remove(request, task_id):
                     results_db.calls.remove({"_id": ObjectId(call)})
             # Delete analysis data.
             results_db.analysis.remove({"_id": ObjectId(analysis["_id"])})
-    elif anals.count() == 0:
-        return render_to_response("error.html",
-                                  {"error": "The specified analysis does not exist"},
-                                  context_instance=RequestContext(request))
-    # More analysis found with the same ID, like if process.py was run manually.
     else:
         return render_to_response("error.html",
-                                  {"error": "The specified analysis is duplicated in mongo, please check manually"},
+                                  {"error": "The specified analysis does not exist"},
                                   context_instance=RequestContext(request))
 
     # Delete from SQL db.
     db = Database()
     db.delete_task(task_id)
 
-    return render_to_response("success.html",
-                              {"message": "Task deleted, thanks for all the fish."},
+    return render_to_response("success_simple.html",
+                              {"message": message},
                               context_instance=RequestContext(request))
 
 @require_safe

@@ -347,13 +347,15 @@ class PortableExecutable:
                 if swig_pkcs7:
                     p7 = SMIME.PKCS7(swig_pkcs7)
                     xst = p7.get0_signers(X509.X509_Stack())
-                    results["digital_signer"] = {}
+                    results["digital_signers"] = []
                     if xst:
                         for cert in xst:
                             sn = cert.get_serial_number()
+                            sha1_fingerprint = cert.get_fingerprint('sha1').lower()
+                            md5_fingerprint = cert.get_fingerprint('md5').lower()
                             subject_str = str(cert.get_subject())
                             cn = subject_str[subject_str.index("/CN=")+len("/CN="):]
-                            results["digital_signer"] = [{"sn":str(sn), "cn":cn}]
+                            results["digital_signers"].append({"sn":str(sn), "cn":cn, "sha1_fingerprint" : sha1_fingerprint, "md5_fingerprint" : md5_fingerprint })
 
         return results
 

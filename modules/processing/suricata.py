@@ -9,8 +9,13 @@ import time
 import sys
 import socket
 import json
-import re
 import shutil
+
+try:
+    import re2 as re
+except ImportError:
+    import re
+
 from lib.cuckoo.common.constants import CUCKOO_ROOT
 from lib.cuckoo.common.abstracts import Processing
 from lib.cuckoo.common.objects import File
@@ -204,7 +209,7 @@ class Suricata(Processing):
                     d = json.loads(l)
                 except:
                     log.warning("failed to load JSON from file log")
-                    next
+                    continue
                 if d["stored"]==True:
                     src_file = "%s/file.%s" % (SURICATA_FILES_DIR_FULL_PATH,d["id"])
                     if SURICATA_FILE_COPY_MAGIC_RE and SURICATA_FILE_COPY_DST_DIR and os.path.exists(SURICATA_FILE_COPY_DST_DIR):
