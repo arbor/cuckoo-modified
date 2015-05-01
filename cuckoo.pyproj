@@ -104,6 +104,9 @@
     <Compile Include="analyzer\windows\modules\packages\swf.py" />
     <Compile Include="cuckoo.py" />
     <Compile Include="agent\agent.py" />
+    <Compile Include="lib\cuckoo\common\icon.py">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="lib\cuckoo\common\office\DridexURLDecoder.py" />
     <Compile Include="lib\cuckoo\common\office\olefile.py" />
     <Compile Include="lib\cuckoo\common\office\oleid.py" />
@@ -178,6 +181,7 @@
     <Compile Include="utils\dist.py" />
     <Compile Include="utils\health_statistics.py" />
     <Compile Include="utils\process.py" />
+    <Compile Include="utils\listdump.py" />
     <Compile Include="utils\stats.py" />
     <Compile Include="utils\submit.py" />
     <Compile Include="utils\web.py" />
@@ -335,6 +339,7 @@
     <Content Include="web\templates\analysis\behavior\_api_call.html" />
     <Content Include="web\templates\analysis\behavior\_search.html" />
     <Content Include="web\templates\analysis\behavior\_search_results.html" />
+    <Content Include="web\templates\analysis\network\_cif.html" />
     <Content Include="web\templates\analysis\reports\index.html" />
     <Content Include="web\templates\analysis\network\_suricata_alerts.html" />
     <Content Include="web\templates\analysis\network\_suricata_files.html" />

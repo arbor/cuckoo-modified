@@ -7,6 +7,11 @@ import lib.cuckoo.common.office.olefile as olefile
 import lib.cuckoo.common.office.vbadeobf as vbadeobf
 import logging
 import os
+import base64
+
+from lib.cuckoo.common.icon import PEGroupIconDir
+from PIL import Image
+from StringIO import StringIO
 from datetime import datetime, date, time
 
 try:
@@ -248,6 +253,51 @@ class PortableExecutable:
 
         return resources
 
+    def _get_icon(self):
+        """Get icon in PNG format.
+        @return: image data in PNG format, encoded as base64
+        """
+        if not self.pe:
+            return None
+
+        try:
+            rt_group_icon_idx = [entry.id for entry in self.pe.DIRECTORY_ENTRY_RESOURCE.entries].index(pefile.RESOURCE_TYPE['RT_GROUP_ICON'])
+            rt_group_icon_dir = self.pe.DIRECTORY_ENTRY_RESOURCE.entries[rt_group_icon_idx]
+            entry = rt_group_icon_dir.directory.entries[0]
+            offset = entry.directory.entries[0].data.struct.OffsetToData
+            size = entry.directory.entries[0].data.struct.Size
+            peicon = PEGroupIconDir(self.pe.get_memory_mapped_image()[offset:offset+size])
+            bigwidth = 0
+            bigheight = 0
+            bigbpp = 0
+            bigidx = -1
+            iconidx = 0
+            for idx,icon in enumerate(peicon.icons):
+                if icon.bWidth >= bigwidth and icon.bHeight >= bigheight and icon.wBitCount >= bigbpp:
+                    bigwidth = icon.bWidth
+                    bigheight = icon.bHeight
+                    bigbpp = icon.wBitCount
+                    bigidx = icon.nID
+                    iconidx = idx
+
+            rt_icon_idx = [entry.id for entry in self.pe.DIRECTORY_ENTRY_RESOURCE.entries].index(pefile.RESOURCE_TYPE['RT_ICON'])
+            rt_icon_dir = self.pe.DIRECTORY_ENTRY_RESOURCE.entries[rt_icon_idx]
+            for entry in rt_icon_dir.directory.entries:
+                if entry.id == bigidx:
+                    offset = entry.directory.entries[0].data.struct.OffsetToData
+                    size = entry.directory.entries[0].data.struct.Size
+                    icon = peicon.get_icon_file(iconidx, self.pe.get_memory_mapped_image()[offset:offset+size])
+
+                    strio = StringIO()
+                    output = StringIO()
+                    strio.write(icon)
+                    strio.seek(0)
+                    img = Image.open(strio)
+                    img.save(output, format="PNG")
+                    return base64.b64encode(output.getvalue())
+        except:
+            return None
+
     def _get_versioninfo(self):
         """Get version info.
         @return: info dict or None.
@@ -326,6 +376,7 @@ class PortableExecutable:
         results["pe_sections"] = self._get_sections()
         results["pe_overlay"] = self._get_overlay()
         results["pe_resources"] = self._get_resources()
+        results["pe_icon"] = self._get_icon()
         results["pe_versioninfo"] = self._get_versioninfo()
         results["pe_imphash"] = self._get_imphash()
         results["pe_timestamp"] = self._get_timestamp()
