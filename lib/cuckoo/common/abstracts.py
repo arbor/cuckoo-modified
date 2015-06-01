@@ -673,6 +673,7 @@ class Signature(object):
     filter_processnames = set()
     filter_apinames = set()
     filter_categories = set()
+    filter_analysistypes = set()
 
     def __init__(self, results=None):
         self.data = []
@@ -1255,6 +1256,8 @@ class Signature(object):
             name=self.name,
             description=self.description,
             severity=self.severity,
+            weight=self.weight,
+            confidence=self.confidence,
             references=self.references,
             data=self.data,
             new_data=self.new_data,

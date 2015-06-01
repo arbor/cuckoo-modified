@@ -29,16 +29,20 @@
             <table class="table table-striped" style="table-layout: fixed;">
                 <thead>
                 <tr>
-                    <th width="3%">ID</th>
+                    <th width="5%">ID</th>
                     <th width="12%">Timestamp</th>
-                    <th width="29%">Filename</th>
+                    <th width="37%">Filename</th>
                     <th width="20%">MD5</th>
-                    <th width="5%">VT</th>
-                    <th width="5%">SuriAlert</th>
-                    <th width="5%">SuriHTTP</th>
-                    <th width="5%">SuriTLS</th>
-                    <th width="5%">SuriFiles</th>
+                    {% if config.moloch %}
                     <th width="5%">Moloch</th>
+                    {% endif %}
+                    {% if config.suricata %}
+                    <th width="5%">SuriAlert</th>
+                    {% endif %}
+                    {% if config.virustotal %}
+                    <th width="5%">VT</th>
+                    {% endif %}
+                    <th width="5%">MalScore</th>
                     <th width="6%" style="text-align: right;">Status</th>
                 </tr>
                 </thead>
@@ -61,17 +65,22 @@
                         <td style="word-wrap: break-word;">
                             {% if analysis.status == "reported" %}
                                 <a href="{% url "analysis.views.report" analysis.id %}"><span class="mono">{{analysis.sample.md5}}</span></a>
+                            {% elif analysis.status == "running" or analysis.status == "completed" %}
+                                <a href="{% url "submission.views.status" analysis.id %}"><span class="mono">{{analysis.sample.md5}}</span></a>
                             {% else %}
                                 <span class="mono">{{analysis.sample.md5}}</span>
                             {% endif %}
                         </td>
+                        {% if config.moloch %}
                         <td>
-                            {% if analysis.virustotal_summary %}
-                                <span class="mono">{{analysis.virustotal_summary}}</span>
+                            {% if analysis.moloch_url %}
+                                <a href={{analysis.moloch_url}} target="_blank"><span class="mono">MOLOCH</span></a>
                             {% else %}
                                   <span class="mono">None</span>
                             {% endif %}
                         </td>
+                        {% endif %}
+                        {% if config.suricata %}
                         <td>
                             {% if analysis.suri_alert_cnt %}
                                 <span class="mono">{{analysis.suri_alert_cnt}}</span>
@@ -79,32 +88,27 @@
                                   <span class="mono">None</span>
                             {% endif %}
                         </td>
+                        {% endif %}
+                        {% if config.virustotal %}
                         <td>
-                            {% if analysis.suri_http_cnt %}
-                                <span class="mono">{{analysis.suri_http_cnt}}</span>
+                            {% if analysis.virustotal_summary %}
+                                <span class="mono">{{analysis.virustotal_summary}}</span>
                             {% else %}
                                   <span class="mono">None</span>
                             {% endif %}
                         </td>
+                        {% endif %}
                         <td>
-                            {% if analysis.suri_tls_cnt %}
-                                <span class="mono">{{analysis.suri_tls_cnt}}</span>
+                            {% if analysis.malscore != None %}
+                                {% if analysis.malscore <= 2.0 %}
+                                <span class="label label-success">{{analysis.malscore|floatformat:1}}</span>
+                                {% elif analysis.malscore <= 6.0 %}
+                                <span class="label label-warning">{{analysis.malscore|floatformat:1}}</span>
+                                {% else %}
+                                <span class="label label-danger">{{analysis.malscore|floatformat:1}}</span>
+                                {% endif %}
                             {% else %}
-                                  <span class="mono">None</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            {% if analysis.suri_file_cnt %}
-                                <span class="mono">{{analysis.suri_file_cnt}}</span>
-                            {% else %}
-                                  <span class="mono">None</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            {% if analysis.moloch_url %}
-                                <a href={{analysis.moloch_url}} target="_blank"><span class="mono">MOLOCH</span></a>
-                            {% else %}
-                                  <span class="mono">None</span>
+                                <span class="mono">None</span>
                             {% endif %}
                         </td>
                         <td style="text-align: right;">
@@ -113,7 +117,7 @@
                             {% elif analysis.status == "running" %}
                                 <span class="text-warning">running</span>
                             {% elif analysis.status == "completed" %}
-                                <span class="text-info">completed</span>
+                                <span class="text-info">processing</span>
                             {% elif analysis.status == "reported" %}
                                 {% if analysis.errors %}
                                     <span class="text-danger">
@@ -134,6 +138,18 @@
             <div class="panel-body">No files to display on this page.</div>
             {% endif %}
         </div>
+    {% if paging.show_file_next == "show" or paging.show_file_prev == "show" %}
+        <nav>
+           <ul class="pager">
+           {% if paging.show_file_prev == "show" %}
+               <li><a href="{% url "analysis.views.index" %}page/{{paging.prev_page}}/">&larr; Newer</a></li>
+           {% endif %}
+           {% if paging.show_file_next == "show" %}
+               <li><a href="{% url "analysis.views.index" %}page/{{paging.next_page}}/">Older &rarr;</a></li>
+           {% endif %}
+           </ul>
+        </nav>
+    {% endif %}
     </div>
 
     <div class="tab-pane fade" id="urls">
@@ -157,14 +173,16 @@
             <table class="table table-striped" style="table-layout: fixed;">
                 <thead>
                 <tr>
-                    <th width="3%">ID</th>
+                    <th width="5%">ID</th>
                     <th width="12%">Timestamp</th>
-                    <th width="53%">URL</th>
-                    <th width="5%">SuriAlert</th>
-                    <th width="5%">SuriHTTP</th>
-                    <th width="5%">SuriTLS</th>
-                    <th width="5%">SuriFiles</th>
+                    <th width="61%">URL</th>
+                    {% if config.moloch %}
                     <th width="5%">Moloch</th>
+                    {% endif %}
+                    {% if config.suricata %}
+                    <th width="5%">SuriAlert</th>
+                    {% endif %}
+                    <th width="5%">MalScore</th>
                     <th width="7%" style="text-align: right;">Status</th>
                 </tr>
                 </thead>
@@ -183,10 +201,23 @@
                         </td>
                         <td style="word-wrap: break-word;">
                             {% if analysis.status == "reported" %}
-                                <a href="{% url "analysis.views.report" analysis.id %}"><span class="mono">{{analysis.target}}</span></a></td>
+                                <a href="{% url "analysis.views.report" analysis.id %}"><span class="mono">{{analysis.target}}</span></a>
+                            {% elif analysis.status == "running" or analysis.status == "completed" %}
+                                <a href="{% url "submission.views.status" analysis.id %}"><span class="mono">{{analysis.target}}</span></a>
                             {% else %}
                                 <span class="mono">{{analysis.target}}</span>
                             {% endif %}
+                        </td>
+                        {% if config.moloch %}
+                        <td>
+                            {% if analysis.moloch_url %}
+                                <a href={{analysis.moloch_url}} target="_blank"><span class="mono">MOLOCH</span></a>
+                            {% else %}
+                                  <span class="mono">None</span>
+                            {% endif %}
+                        </td>
+                        {% endif %}
+                        {% if config.suricata %}
                         <td>
                             {% if analysis.suri_alert_cnt %}
                                 <span class="mono">{{analysis.suri_alert_cnt}}</span>
@@ -194,32 +225,18 @@
                                   <span class="mono">None</span>
                             {% endif %}
                         </td>
+                        {% endif %}
                         <td>
-                            {% if analysis.suri_http_cnt %}
-                                <span class="mono">{{analysis.suri_http_cnt}}</span>
+                            {% if analysis.malscore != None %}
+                                {% if analysis.malscore <= 2.0 %}
+                                <span class="label label-success">{{analysis.malscore}}</span>
+                                {% elif analysis.malscore <= 6.0 %}
+                                <span class="label label-warning">{{analysis.malscore}}</span>
+                                {% else %}
+                                <span class="label label-danger">{{analysis.malscore}}</span>
+                                {% endif %}
                             {% else %}
-                                  <span class="mono">None</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            {% if analysis.suri_tls_cnt %}
-                                <span class="mono">{{analysis.suri_tls_cnt}}</span>
-                            {% else %}
-                                  <span class="mono">None</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            {% if analysis.suri_file_cnt %}
-                                <span class="mono">{{analysis.suri_file_cnt}}</span></a>
-                            {% else %}
-                                  <span class="mono">None</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            {% if analysis.moloch_url %}
-                                <a href={{analysis.moloch_url}} target="_blank"><span class="mono">MOLOCH</span></a>
-                            {% else %}
-                                  <span class="mono">None</span>
+                                <span class="mono">None</span>
                             {% endif %}
                         </td>
                         <td style="text-align: right;">
@@ -228,7 +245,7 @@
                             {% elif analysis.status == "running" %}
                                 <span class="text-warning">running</span>
                             {% elif analysis.status == "completed" %}
-                                <span class="text-info">completed</span>
+                                <span class="text-info">processing</span>
                             {% elif analysis.status == "reported" %}
                                 <span class="text-success">reported</span>
                             {% else %}
@@ -243,7 +260,20 @@
             <div class="panel-body">No URLS to display on this page.</div>
             {% endif %}
         </div>
+    {% if paging.show_url_next == "show" or paging.show_url_prev == "show" %}
+        <nav>
+           <ul class="pager">
+           {% if paging.show_url_prev == "show" %}
+               <li><a href="{% url "analysis.views.index" %}page/{{paging.prev_page}}/">&larr; Newer</a></li>
+           {% endif %}
+           {% if paging.show_url_next == "show" %}
+               <li><a href="{% url "analysis.views.index" %}page/{{paging.next_page}}/">Older &rarr;</a></li>
+           {% endif %}
+           </ul>
+        </nav>
+    {% endif %}
     </div>
+  </div>
 </div>
 <script>
 $(function() {

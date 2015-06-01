@@ -16,7 +16,7 @@ from lib.cuckoo.common.exceptions import CuckooOperationalError
 from lib.cuckoo.common.exceptions import CuckooCriticalError
 from lib.cuckoo.common.exceptions import CuckooResultError
 from lib.cuckoo.common.netlog import BsonParser
-from lib.cuckoo.common.utils import create_folder, Singleton, logtime
+from lib.cuckoo.common.utils import create_folder, Singleton, logtime, sanitize_pathname
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +138,13 @@ class ResultHandler(SocketServer.BaseRequestHandler):
     def finish(self):
         self.done_event.set()
 
+        if self.protocol:
+            self.protocol.close()
+        if self.logfd:
+            self.logfd.close()
+        if self.rawlogfd:
+            self.rawlogfd.close()
+
     def wait_sock_or_end(self):
         while True:
             if self.end_request.isSet():
@@ -222,13 +229,6 @@ class ResultHandler(SocketServer.BaseRequestHandler):
             log.exception("FIXME - exception in resultserver connection %s",
                           str(self.client_address))
 
-        if self.protocol:
-            self.protocol.close()
-
-        if self.logfd:
-            self.logfd.close()
-        if self.rawlogfd:
-            self.rawlogfd.close()
 
         log.debug("Connection closed: {0}:{1}".format(ip, port))
 
@@ -323,11 +323,13 @@ class FileUpload(object):
         buf = self.handler.read_newline().strip().replace("\\", "/")
         guest_path = ""
         if self.is_binary:
-            guest_path = self.handler.read_newline().strip()[:32768]
-
-        log.debug("File upload request for {0}".format(buf))
+            guest_path = sanitize_pathname(self.handler.read_newline().strip()[:32768])
 
         dir_part, filename = os.path.split(buf)
+        filename = sanitize_pathname(filename)
+        buf = os.path.join(dir_part, filename)
+
+        log.debug("File upload request for {0}".format(buf))
 
         if "./" in buf or not dir_part or buf.startswith("/"):
             raise CuckooOperationalError("FileUpload failure, banned path.")
@@ -342,7 +344,7 @@ class FileUpload(object):
             log.error("Unable to create folder %s" % dir_part)
             return False
 
-        file_path = os.path.join(self.storagepath, buf.strip())
+        file_path = os.path.join(self.storagepath, buf)
 
         if not file_path.startswith(self.storagepath):
             raise CuckooOperationalError("FileUpload failure, path sanitization failed.")

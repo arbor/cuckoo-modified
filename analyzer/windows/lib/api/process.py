@@ -25,6 +25,7 @@ from lib.common.errors import get_error_string
 from lib.common.rand import random_string
 from lib.common.results import NetlogFile
 from lib.core.config import Config
+from lib.core.log import LogServer
 
 IOCTL_PID = 0x222008
 IOCTL_CUCKOO_PATH = 0x22200C
@@ -68,6 +69,8 @@ class Process:
         self.h_thread = h_thread
         self.suspended = suspended
         self.system_info = SYSTEM_INFO()
+        self.logserver_path = "\\\\.\\PIPE\\" + random_string(8, 12)
+        self.logserver = None
 
     def __del__(self):
         """Close open handles."""
@@ -525,11 +528,15 @@ class Process:
             cfg = Config("analysis.conf")
             cfgoptions = cfg.get_options()
 
+            # start the logserver for this monitored process
+            self.logserver = LogServer(cfg.ip, cfg.port, self.logserver_path)
+
             firstproc = Process.first_process
 
             config.write("host-ip={0}\n".format(cfg.ip))
             config.write("host-port={0}\n".format(cfg.port))
             config.write("pipe={0}\n".format(PIPE))
+            config.write("logserver={0}\n".format(self.logserver_path))
             config.write("results={0}\n".format(PATHS["root"]))
             config.write("analyzer={0}\n".format(os.getcwd()))
             config.write("first-process={0}\n".format("1" if firstproc else "0"))

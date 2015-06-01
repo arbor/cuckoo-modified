@@ -35,7 +35,17 @@ results_db = pymongo.MongoClient(settings.MONGO_HOST, settings.MONGO_PORT)[setti
 fs = GridFS(results_db)
 
 TASK_LIMIT = 25
-repconf = Config("reporting")
+
+# Used for displaying enabled config options in Django UI
+enabledconf = dict()
+for cfile in ["reporting", "processing"]:
+    curconf = Config(cfile)
+    confdata = curconf.get_config()
+    for item in confdata:
+        if confdata[item]["enabled"] == "yes":
+            enabledconf[item] = True
+        else:
+            enabledconf[item] = False
 
 @require_safe
 def index(request, page=1):
@@ -86,7 +96,7 @@ def index(request, page=1):
             if db.view_errors(task.id):
                 new["errors"] = True
 
-            rtmp = results_db.analysis.find_one({"info.id": int(new["id"])},{"virustotal_summary": 1, "suri_tls_cnt": 1, "suri_alert_cnt": 1, "suri_http_cnt": 1, "suri_file_cnt": 1},sort=[("_id", pymongo.DESCENDING)])
+            rtmp = results_db.analysis.find_one({"info.id": int(new["id"])},{"virustotal_summary": 1, "malscore": 1, "suri_tls_cnt": 1, "suri_alert_cnt": 1, "suri_http_cnt": 1, "suri_file_cnt": 1},sort=[("_id", pymongo.DESCENDING)])
             if rtmp:
                 if rtmp.has_key("virustotal_summary") and rtmp["virustotal_summary"]:
                     new["virustotal_summary"] = rtmp["virustotal_summary"]
@@ -98,6 +108,8 @@ def index(request, page=1):
                     new["suri_file_cnt"] = rtmp["suri_file_cnt"]
                 if rtmp.has_key("suri_http_cnt") and rtmp["suri_http_cnt"]:
                     new["suri_http_cnt"] = rtmp["suri_http_cnt"]
+                if rtmp.has_key("malscore"):
+                    new["malscore"] = rtmp["malscore"]
 
             if settings.MOLOCH_ENABLED:
                 if settings.MOLOCH_BASE[-1] != "/":
@@ -118,7 +130,7 @@ def index(request, page=1):
             if db.view_errors(task.id):
                 new["errors"] = True
 
-            rtmp = results_db.analysis.find_one({"info.id": int(new["id"])},{"virustotal_summary": 1, "suri_tls_cnt": 1, "suri_alert_cnt": 1, "suri_http_cnt": 1, "suri_file_cnt": 1},sort=[("_id", pymongo.DESCENDING)])
+            rtmp = results_db.analysis.find_one({"info.id": int(new["id"])},{"virustotal_summary": 1, "malscore": 1, "suri_tls_cnt": 1, "suri_alert_cnt": 1, "suri_http_cnt": 1, "suri_file_cnt": 1},sort=[("_id", pymongo.DESCENDING)])
             if rtmp:
                 if rtmp.has_key("virustotal_summary") and rtmp["virustotal_summary"]:
                     new["virustotal_summary"] = rtmp["virustotal_summary"]
@@ -130,6 +142,8 @@ def index(request, page=1):
                     new["suri_file_cnt"] = rtmp["suri_file_cnt"]
                 if rtmp.has_key("suri_http_cnt") and rtmp["suri_http_cnt"]:
                     new["suri_http_cnt"] = rtmp["suri_http_cnt"]
+                if rtmp.has_key("malscore"):
+                    new["malscore"] = rtmp["malscore"]
 
             if settings.MOLOCH_ENABLED:
                 if settings.MOLOCH_BASE[-1] != "/":
@@ -142,7 +156,8 @@ def index(request, page=1):
 
     return render_to_response("analysis/index.html",
             {"files": analyses_files, "urls": analyses_urls,
-             "paging": paging}, context_instance=RequestContext(request))
+             "paging": paging, "config": enabledconf},
+            context_instance=RequestContext(request))
 
 @require_safe
 def pending(request):
@@ -323,14 +338,6 @@ def report(request, task_id):
         domainlookups = dict()
         iplookups = dict()
 
-    conf = repconf.get_config()
-    enabledconf = dict()
-    for item in conf:
-        if conf[item]["enabled"] == "yes":
-            enabledconf[item] = True
-        else:
-            enabledconf[item] = False
-
     return render_to_response("analysis/report.html",
                              {"analysis": report,
                               "domainlookups": domainlookups,
@@ -377,13 +384,13 @@ def procdump(request, object_id, task_id, process_id, start, end):
 
     if file_item and analysis and "procmemory" in analysis:
         for proc in analysis["procmemory"]:
-            if proc["pid"] == process_id:
+            if proc["pid"] == int(process_id):
                 data = ""
                 for memmap in proc["address_space"]:
                     for chunk in memmap["chunks"]:
-                        if int(memmap["start"], 16) >= int(start, 16) and int(memmap["end"], 16) <= int(end, 16):
-                            file_item.seek(memmap["offset"])
-                            data += file_item.read(memmap["size"])
+                        if int(chunk["start"], 16) >= int(start, 16) and int(chunk["end"], 16) <= int(end, 16):
+                            file_item.seek(chunk["offset"])
+                            data += file_item.read(int(chunk["size"], 16))
                 if len(data):
                     content_type = "application/octet-stream"
                     response = HttpResponse(data, content_type=content_type)
@@ -544,7 +551,7 @@ def search(request):
                 filename = os.path.basename(new["target"])
                 new.update({"filename": filename})
 
-            rtmp = results_db.analysis.find_one({"info.id": int(new["id"])},{"virustotal_summary": 1, "suri_tls_cnt": 1, "suri_alert_cnt": 1, "suri_http_cnt": 1, "suri_file_cnt": 1, "mlist_cnt": 1},sort=[("_id", pymongo.DESCENDING)])
+            rtmp = results_db.analysis.find_one({"info.id": int(new["id"])},{"virustotal_summary": 1, "malscore": 1, "suri_tls_cnt": 1, "suri_alert_cnt": 1, "suri_http_cnt": 1, "suri_file_cnt": 1, "mlist_cnt": 1},sort=[("_id", pymongo.DESCENDING)])
             if rtmp:
                 if rtmp.has_key("virustotal_summary") and rtmp["virustotal_summary"]:
                     new["virustotal_summary"] = rtmp["virustotal_summary"]
@@ -558,6 +565,9 @@ def search(request):
                     new["suri_http_cnt"] = rtmp["suri_http_cnt"]
                 if rtmp.has_key("mlist_cnt") and rtmp["mlist_cnt"]:
                     new["mlist_cnt"] = rtmp["mlist_cnt"]
+                if rtmp.has_key("malscore"):
+                    new["malscore"] = rtmp["malscore"]
+
             if settings.MOLOCH_ENABLED:
                 if settings.MOLOCH_BASE[-1] != "/":
                     settings.MOLOCH_BASE = settings.MOLOCH_BASE + "/"
@@ -601,6 +611,11 @@ def remove(request, task_id):
             # Delete network pcap.
             if "pcap_id" in analysis["network"] and results_db.analysis.find({"network.pcap_id": ObjectId(analysis["network"]["pcap_id"])}).count() == 1:
                 fs.delete(ObjectId(analysis["network"]["pcap_id"]))
+            
+            # Delete sorted pcap
+            if "sorted_pcap_id" in analysis["network"] and results_db.analysis.find({"network.sorted_pcap_id": ObjectId(analysis["network"]["sorted_pcap_id"])}).count() == 1:
+                fs.delete(ObjectId(analysis["network"]["sorted_pcap_id"]))
+                
             # Delete dropped.
             for drop in analysis["dropped"]:
                 if "object_id" in drop and results_db.analysis.find({"dropped.object_id": ObjectId(drop["object_id"])}).count() == 1:

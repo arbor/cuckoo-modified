@@ -34,6 +34,7 @@ def index(request):
         priority = force_int(request.POST.get("priority"))
         machine = request.POST.get("machine", "")
         gateway = request.POST.get("gateway", None)
+        clock = request.POST.get("clock", None)
         custom = request.POST.get("custom", "")
         memory = bool(request.POST.get("memory", False))
         enforce_timeout = bool(request.POST.get("enforce_timeout", False))
@@ -103,7 +104,7 @@ def index(request):
     
                 for entry in task_machines:
                     task_ids_new = db.demux_sample_and_add_to_db(file_path=path, package=package, timeout=timeout, options=options, priority=priority,
-                                                                 machine=entry, custom=custom, memory=memory, enforce_timeout=enforce_timeout, tags=tags)
+                                                                 machine=entry, custom=custom, memory=memory, enforce_timeout=enforce_timeout, tags=tags, clock=clock)
                     task_ids.extend(task_ids_new)
         elif "url" in request.POST and request.POST.get("url").strip():
             url = request.POST.get("url").strip()
@@ -122,7 +123,8 @@ def index(request):
                                      custom=custom,
                                      memory=memory,
                                      enforce_timeout=enforce_timeout,
-                                     tags=tags)
+                                     tags=tags,
+                                     clock=clock)
                 if task_id:
                     task_ids.append(task_id)
         elif settings.VTDL_ENABLED and "vtdl" in request.POST:
@@ -169,7 +171,7 @@ def index(request):
 
                         for entry in task_machines:
                             task_ids_new = db.demux_sample_and_add_to_db(file_path=filename, package=package, timeout=timeout, options=options, priority=priority,
-                                                                         machine=entry, custom=custom, memory=memory, enforce_timeout=enforce_timeout, tags=tags)
+                                                                         machine=entry, custom=custom, memory=memory, enforce_timeout=enforce_timeout, tags=tags, clock=clock)
                             task_ids.extend(task_ids_new)
                     elif r.status_code == 403:
                         return render_to_response("error.html",
@@ -241,8 +243,12 @@ def status(request, task_id):
     if task.status == "reported":
         completed = True
 
+    status = task.status
+    if status == "completed":
+        status = "processing"
+
     return render_to_response("submission/status.html",
                               {"completed" : completed,
-                               "status" : task.status,
+                               "status" : status,
                                "task_id" : task_id},
                               context_instance=RequestContext(request))

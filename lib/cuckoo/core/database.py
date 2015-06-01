@@ -5,7 +5,7 @@
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from lib.cuckoo.common.config import Config
 from lib.cuckoo.common.constants import CUCKOO_ROOT
@@ -288,7 +288,7 @@ class Task(Base):
     memory = Column(Boolean, nullable=False, default=False)
     enforce_timeout = Column(Boolean, nullable=False, default=False)
     clock = Column(DateTime(timezone=False),
-                   default=datetime.now,
+                   default=datetime.now(),
                    nullable=False)
     added_on = Column(DateTime(timezone=False),
                       default=datetime.now,
@@ -1016,6 +1016,13 @@ class Database(object):
                     task.clock = datetime.now()
             else:
                 task.clock = clock
+        elif isinstance(obj, File):
+            cfg = Config()
+            try:
+                clocktime = datetime.now() + timedelta(days=cfg.cuckoo.daydelta)
+                task.clock = clocktime
+            except:
+                pass
 
         session.add(task)
 

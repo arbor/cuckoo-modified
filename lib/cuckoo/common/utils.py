@@ -67,6 +67,8 @@ def delete_folder(folder):
 PRINTABLE_CHARACTERS = \
     string.letters + string.digits + string.punctuation + " \t\r\n"
 
+FILENAME_CHARACTERS = string.letters + string.digits + string.punctuation.replace("/", "") + " "
+
 def convert_char(c):
     """Escapes characters.
     @param c: dirty char.
@@ -84,6 +86,23 @@ def is_printable(s):
             return False
     return True
 
+def convert_filename_char(c):
+    """Escapes filename characters.
+    @param c: dirty char.
+    @return: sanitized char.
+    """
+    if c in FILENAME_CHARACTERS:
+        return c
+    else:
+        return "\\x%02x" % ord(c)
+
+def is_sane_filename(s):
+    """ Test if a filename is sane."""
+    for c in s:
+        if c not in FILENAME_CHARACTERS:
+            return False
+    return True
+
 def convert_to_printable(s, cache=None):
     """Convert char to printable.
     @param s: string.
@@ -98,6 +117,16 @@ def convert_to_printable(s, cache=None):
     elif not s in cache:
         cache[s] = "".join(convert_char(c) for c in s)
     return cache[s]
+
+def sanitize_pathname(s):
+    """Sanitize filename.
+    @param s: string.
+    @return: sanitized filename.
+    """
+    if is_sane_filename(s):
+        return s
+
+    return "".join(convert_filename_char(c) for c in s)
 
 def pretty_print_retval(category, api_name, status, retval):
     """Creates pretty-printed versions of an API return value
@@ -129,6 +158,7 @@ def pretty_print_retval(category, api_name, status, retval):
             0xc0000024 : "OBJECT_TYPE_MISMATCH",
             0xc0000033 : "OBJECT_NAME_INVALID",
             0xc0000034 : "OBJECT_NAME_NOT_FOUND",
+            0xc0000035 : "OBJECT_NAME_COLLISION",
             0xc0000039 : "OBJECT_PATH_INVALID",
             0xc000003a : "OBJECT_PATH_NOT_FOUND",
             0xc000003c : "DATA_OVERRUN",
@@ -552,6 +582,7 @@ def pretty_print_arg(category, api_name, arg_name, arg_val):
                 0x4d008 : "IOCTL_SCSI_MINIPORT",
                 0x4d014 : "IOCTL_SCSI_PASS_THROUGH_DIRECT",
                 0x70000 : "IOCTL_DISK_GET_DRIVE_GEOMETRY",
+                0x700a0 : "IOCTL_DISK_GET_DRIVE_GEOMETRY_EX",
                 0x7405c : "IOCTL_DISK_GET_LENGTH_INFO",
                 0x90018 : "FSCTL_LOCK_VOLUME",
                 0x9001c : "FSCTL_UNLOCK_VOLUME",
@@ -841,9 +872,9 @@ def pretty_print_arg(category, api_name, arg_name, arg_val):
             res.append("PROCESS_ALL_ACCESS")
             val &= ~0x1fffff
         # for < vista
-        if (val & 0x1f03ff) == 0x1f0fff:
+        if (val & 0x1f0fff) == 0x1f0fff:
             res.append("PROCESS_ALL_ACCESS")
-            val &= ~0x1f03ff
+            val &= ~0x1f0fff
         val &= ~remove
         if val & 0x0001:
             res.append("PROCESS_TERMINATE")
@@ -1310,6 +1341,17 @@ def sanitize_filename(x):
             out += "_"
 
     return out
+
+def default_converter(v):
+    # Fix signed ints (bson is kind of limited there).
+    if type(v) is int:
+        return v & 0xFFFFFFFF
+    elif type(v) is long:
+        if v & 0xFFFFFFFF00000000:
+            return v & 0xFFFFFFFFFFFFFFFF
+        else:
+            return v & 0xFFFFFFFF
+    return v
 
 def classlock(f):
     """Classlock decorator (created for database.Database).

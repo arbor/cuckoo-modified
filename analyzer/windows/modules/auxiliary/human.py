@@ -1,17 +1,19 @@
 #!/usr/bin/env python
-# Copyright (C) 2010-2015 Cuckoo Foundation.
+# Copyright (C) 2010-2015 Cuckoo Foundation, Accuvant, Inc. (bspengler@accuvant.com)
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
 import random
 import logging
+import traceback
 from threading import Thread
 from ctypes import WINFUNCTYPE, POINTER
-from ctypes import c_bool, c_int, create_unicode_buffer
+from ctypes import c_bool, c_int, create_unicode_buffer, create_string_buffer, memmove, sizeof
 
 from lib.common.abstracts import Auxiliary
 from lib.common.defines import KERNEL32, USER32
 from lib.common.defines import WM_GETTEXT, WM_GETTEXTLENGTH, WM_CLOSE, BM_CLICK
+from lib.common.defines import GMEM_MOVEABLE, CF_TEXT
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +24,8 @@ RESOLUTION = {
     "x": USER32.GetSystemMetrics(0),
     "y": USER32.GetSystemMetrics(1)
 }
+
+INITIAL_HWNDS = []
 
 def foreach_child(hwnd, lparam):
     # List of buttons labels to click.
@@ -57,15 +61,15 @@ def foreach_child(hwnd, lparam):
         length = USER32.SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0)
         text = create_unicode_buffer(length + 1)
         USER32.SendMessageW(hwnd, WM_GETTEXT, length + 1, text)
-
+        textval = text.value.replace('&','')
         # Check if the button is set as "clickable" and click it.
         for button in buttons:
-            if button in text.value.lower():
-                dontclick = False
+            if button in textval.lower():
+                dontclickb = False
                 for btn in dontclick:
-                    if btn in text.value.lower():
-                        dontclick = True
-                if not dontclick:
+                    if btn in textval.lower():
+                        dontclickb = True
+                if not dontclickb:
                     log.info("Found button \"%s\", clicking it" % text.value)
                     USER32.SetForegroundWindow(hwnd)
                     KERNEL32.Sleep(1000)
@@ -81,6 +85,12 @@ def foreach_window(hwnd, lparam):
     # for buttons.
     if USER32.IsWindowVisible(hwnd):
         USER32.EnumChildWindows(hwnd, EnumChildProc(foreach_child), 0)
+    return True
+
+def getwindowlist(hwnd, lparam):
+    global INITIAL_HWNDS
+    if USER32.IsWindowVisible(hwnd):
+        INITIAL_HWNDS.append(hwnd)
     return True
 
 def move_mouse():
@@ -109,8 +119,9 @@ def get_office_window(hwnd, lparam):
     if USER32.IsWindowVisible(hwnd):
         text = create_unicode_buffer(1024)
         USER32.GetWindowTextW(hwnd, text, 1024)
-        if "- Microsoft" in text:
+        if "- Microsoft" in text.value:
             # send ALT+F4 equivalent
+            log.info("Closing Office window.")
             USER32.SendMessageW(hwnd, WM_CLOSE, None, None)
     return True
 
@@ -126,29 +137,68 @@ class Human(Auxiliary, Thread):
         self.do_run = False
 
     def run(self):
-        seconds = 0
-        nohuman = self.options.get("nohuman")
-        if nohuman:
-            return True
-        file_type = self.config.file_type
-        file_name = self.config.file_name
-        officedoc = False
-        if "Rich Text Format" in file_type or "Microsoft Word" in file_type or \
-            "Microsoft Office Word" in file_type or file_name.endswith((".doc", ".docx", ".rtf")):
-            officedoc = True
-        elif "Microsoft Office Excel" in file_type or "Microsoft Excel" in file_type or \
-            file_name.endswith((".xls", ".xlsx")):
-            officedoc = True
-        elif "Microsoft PowerPoint" in file_type or \
-            file_name.endswith((".ppt", ".pptx", ".pps", ".ppsx", ".pptm", ".potm", ".potx", ".ppsm")):
-            officedoc = True
+        try:
+            seconds = 0
+            randoff = random.randint(0, 10)
 
-        while self.do_run:
-            if officedoc and seconds == 30:
-                USER32.EnumWindows(EnumWindowsProc(get_office_window), 0)
+            # add some random data to the clipboard
+            randchars = list("   aaaabcddeeeeeefghhhiiillmnnnooooprrrsssttttuwy")
+            cliplen = random.randint(10,1000)
+            clipval = []
+            for i in range(cliplen):
+                clipval.append(randchars[random.randint(0, len(randchars)-1)])
+            clipstr = "".join(clipval)
+            cliprawstr = create_string_buffer(clipstr)
+            USER32.OpenClipboard(None)
+            USER32.EmptyClipboard()
 
-            click_mouse()
-            move_mouse()
-            USER32.EnumWindows(EnumWindowsProc(foreach_window), 0)
-            KERNEL32.Sleep(1000)
-            seconds += 1
+            buf = KERNEL32.GlobalAlloc(GMEM_MOVEABLE, sizeof(cliprawstr))
+            lockbuf = KERNEL32.GlobalLock(buf)
+            memmove(lockbuf, cliprawstr, sizeof(cliprawstr))
+            KERNEL32.GlobalUnlock(buf)
+            USER32.SetClipboardData(CF_TEXT, buf)
+
+            nohuman = self.options.get("nohuman")
+            if nohuman:
+                return True
+            officedoc = False
+            if hasattr(self.config, "file_type"):
+                file_type = self.config.file_type
+                file_name = self.config.file_name
+                if "Rich Text Format" in file_type or "Microsoft Word" in file_type or \
+                    "Microsoft Office Word" in file_type or file_name.endswith((".doc", ".docx", ".rtf")):
+                    officedoc = True
+                elif "Microsoft Office Excel" in file_type or "Microsoft Excel" in file_type or \
+                    file_name.endswith((".xls", ".xlsx")):
+                    officedoc = True
+                elif "Microsoft PowerPoint" in file_type or \
+                    file_name.endswith((".ppt", ".pptx", ".pps", ".ppsx", ".pptm", ".potm", ".potx", ".ppsm")):
+                    officedoc = True
+
+            USER32.EnumWindows(EnumWindowsProc(getwindowlist), 0)
+
+            while self.do_run:
+                if officedoc and (seconds % 30) == 0:
+                    USER32.EnumWindows(EnumWindowsProc(get_office_window), 0)
+
+                # only move the mouse 50% of the time, as malware can choose to act on an "idle" system just as it can on an "active" system
+                if random.randint(0, 3) > 1:
+                    click_mouse()
+                    move_mouse()
+
+                if (seconds % (15 + randoff)) == 0:
+                    curwind = USER32.GetForegroundWindow()
+                    other_hwnds = INITIAL_HWNDS[:]
+                    try:
+                        other_hands.remove(USER32.GetForegroundWindow())
+                    except:
+                        pass
+                    USER32.SetForegroundWindow(other_hwnds[random.randint(0, len(other_hwnds)-1)])
+
+                USER32.EnumWindows(EnumWindowsProc(foreach_window), 0)
+                KERNEL32.Sleep(1000)
+                seconds += 1
+        except Exception as e:
+            error_exc = traceback.format_exc()
+            log.exception(error_exc)
+
