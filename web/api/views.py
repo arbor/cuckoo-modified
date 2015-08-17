@@ -57,6 +57,54 @@ rateblock = False
 raterps = None
 raterpm = None
 
+# volatility imports
+has_volatility = False
+try:
+    import volatility.addrspace as addrspace
+    import volatility.conf as conf
+    import volatility.registry as registry
+    import volatility.commands as commands
+    import volatility.plugins.malware.apihooks as apihooks
+    import volatility.plugins.connscan as connscan
+    import volatility.plugins.dlldump as dlldump
+    import volatility.plugins.dyrescan as dyrescan
+    import volatility.plugins.filescan as filescan
+    import volatility.plugins.malware.impscan as impscan
+    import volatility.plugins.malware.malfind as malfind
+    import volatility.plugins.modscan as modscan
+    import volatility.plugins.plugxconfig as plugxconfig
+    import volatility.plugins.procdump as procdump
+    import volatility.plugins.pstree as pstree
+    import volatility.plugins.malware.psxview as psxview
+    import volatility.plugins.ssdt as ssdt
+    import volatility.plugins.malware.svcscan as svcscan
+    import volatility.plugins.taskmods as taskmods
+    import volatility.plugins.overlays.windows.windows as windows
+
+    has_volatility = True
+    # map plugins to module.class to avoid a hard-coded if/else tree
+    # or one-time use dynamic resolution
+    VOL_PLUGIN_MAP = {
+        'apihooks': apihooks.ApiHooks,
+        'connscan': connscan.ConnScan,
+        'dlldump' : dlldump.DLLDump,
+        'dlllist' : taskmods.DllList,
+        'filescan': filescan.FileScan,
+        'impscan' : impscan.ImpScan,
+        'malfind' : malfind.Malfind,
+        'modscan' : modscan.ModScan,
+        'plugxconfig': plugxconfig.PlugXConfig,
+        'procdump': procdump.ProcDump,
+        'pslist'  : taskmods.PSList,
+        'pstree'  : pstree.PSTree,
+        'psxview' : psxview.PsXview,
+        'ssdt'    : ssdt.SSDT,
+        'svcscan' : svcscan.SvcScan,
+    }
+except ImportError:
+    VOL_PLUGIN_MAP = {}
+    print "[+] Unable to import volatility, volatility api calls will not be available"
+
 def force_int(value):
     try:
         value = int(value)
@@ -259,7 +307,7 @@ def tasks_create_file(request):
                                       )
                 if task_id:
                     task_ids.append(task_id)
-                    
+
         if len(task_ids) > 0:
             resp["task_ids"] = task_ids
             callback = apiconf.filecreate.get("status")
@@ -1478,6 +1526,66 @@ def cuckoo_status(request):
             ),
         )
     return jsonize(resp, response=True)
+
+@ratelimit(key="ip", rate=raterps, block=rateblock)
+@ratelimit(key="ip", rate=raterpm, block=rateblock)
+@csrf_exempt
+def tasks_volatility(request,task_id=0,plugin=None):
+    logbuf = StringIO()
+    logging.basicConfig()
+    rootlogger = logging.getLogger()
+    h = logging.StreamHandler(logbuf)
+    rootlogger.addHandler(h)
+    volconfig = None
+    if has_volatility:
+        folder_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id))
+        memdmp_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id),"memory.dmp")
+        if os.path.exists(folder_path):
+            registry.PluginImporter()
+            volconfig = conf.ConfObject()
+            # volatility config does not clear out old data on its own
+            volconfig.readonly = {}
+            registry.register_global_options(volconfig, commands.Command)
+            registry.register_global_options(volconfig, addrspace.BaseAddressSpace)
+            volconfig.PROFILE="WinXPSP2x86"
+            volconfig.LOCATION = "file://%s" % memdmp_path
+            for k,v in request.POST.items():
+                    volconfig.update(k,eval(v) if v in ('True','False') else v)
+            if plugin in ["procdump","dlldump","vaddump","lsadump","memdump","moddump","malfind"]:
+                if request.method == "POST":
+                    out_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id),"volatility")
+                    log_path = os.path.join(out_path,"volatility.log")
+                    if not os.path.exists(out_path): os.mkdir(out_path)
+                    volconfig.OUTPUT_FILE = log_path
+                    volconfig.update("dump_dir",out_path)
+                    try:
+                        p = VOL_PLUGIN_MAP[plugin](volconfig)
+                        p.execute()
+                        del p
+                        zip_data = StringIO()
+                        with ZipFile(zip_data, "w", ZIP_STORED) as zip_file:
+                            for dump_name in os.listdir(out_path):
+                                zip_file.write(os.path.join(out_path, dump_name), dump_name)
+                        delete_folder(out_path)
+                        return HttpResponse(zip_data.getvalue(), content_type="application/zip")
+                    except Exception, e:
+                        return jsonize({"exception": "%s: %s" % (Exception,e),"msg" : logbuf.getvalue()},response=True)
+                        delete_folder(out_path)
+                else:
+                    return jsonize({"success":False,"response":"Plugin {} requires POST request".format(plugin)},response=True)
+            elif plugin in VOL_PLUGIN_MAP:
+                print plugin,VOL_PLUGIN_MAP[plugin]
+                p = VOL_PLUGIN_MAP[plugin](volconfig)
+                p.render_text(logbuf,p.calculate())
+                del p
+                return jsonize({"success":True,"response":logbuf.getvalue()},response=True)
+            else:
+                return jsonize({"success": False,"response":"Plugin {} not found".format(plugin)},response=True)
+        else:
+            return jsonize({"success": False,"response":"Task report path {} not found".format(folder_path)},response=True)
+    else:
+        return jsonize({"success": False,"response":"Volatility is not available"},response=True)
+
 
 def limit_exceeded(request, exception):
     resp = {"error": True, "error_value": "Rate limit exceeded for this API"}
