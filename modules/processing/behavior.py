@@ -1,4 +1,4 @@
-# Copyright (C) 2010-2015 Cuckoo Foundation, Accuvant, Inc. (bspengler@accuvant.com)
+# Copyright (C) 2010-2015 Cuckoo Foundation, Optiv, Inc. (brad.spengler@optiv.com)
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
@@ -36,11 +36,15 @@ class ParseProcessLog(list):
         self.process_name = None
         self.parent_id = None
         self.module_path = None
+        # Using an empty initializer here allows the assignment of current_log.threads in the Processes run()
+        # method to get a reference to the threads list we eventually build up by fully parsing a log
+        # via the behavior analysis that happens later.  By the time the results dict is used later
+        # to extract this information, it will finally have valid info.
         self.threads = []
         self.first_seen = None
         self.calls = self
         self.lastcall = None
-        self.environdict = None
+        self.environdict = {}
         self.api_count = 0
         self.call_id = 0
         self.conversion_cache = {}
@@ -74,8 +78,13 @@ class ParseProcessLog(list):
             self.fd = None
             return
 
-        # Get the process information from file to determine
-        # process id (file names.)
+        # Get the process information from file
+        # Note that we have to read in all messages until we
+        # get all the information we need, so the invariant below
+        # should involve the last process-related bit of
+        # information logged
+        # Environment info will be filled in as the log is read
+        # and will be stored by reference into the results dict
         while not self.process_id:
             self.parser.read_next_message()
 
@@ -205,7 +214,7 @@ class ParseProcessLog(list):
         @param environdict: dict of the various collected information, which will expand over time
         """
 
-        self.environdict = environdict
+        self.environdict.update(environdict)
 
     def log_anomaly(self, subcategory, tid, funcname, msg):
         """ log an anomaly parsed from data file
@@ -407,6 +416,7 @@ class Summary:
         self.started_services = []
         self.created_services = []
         self.executed_commands = []
+        self.resolved_apis = []
 
     def get_argument(self, call, argname, strip=False):
         for arg in call["arguments"]:
@@ -470,12 +480,25 @@ class Summary:
                self.keys.append(name)
             if name and name not in self.read_keys:
                self.read_keys.append(name)
+        elif call["api"] == "SHGetFileInfoW":
+            filename = self.get_argument(call, "Path")
+            if filename and (len(filename) < 2 or filename[1] != ':'):
+                filename = None
+            if filename and filename not in self.files:
+                self.files.append(filename)
         elif call["api"] == "ShellExecuteExW":
             filename = self.get_argument(call, "FilePath")
             if len(filename) < 2 or filename[1] != ':':
                 filename = None
             if filename and filename not in self.files:
                 self.files.append(filename)
+            path = self.get_argument(call, "FilePath", strip=True)
+            params = self.get_argument(call, "Parameters", strip=True)
+            cmdline = None
+            if path:
+                cmdline = path + " " + params
+            if cmdline and cmdline not in self.executed_commands:
+                self.executed_commands.append(cmdline)
         elif call["api"] == "NtSetInformationFile":
             filename = self.get_argument(call, "HandleName")
             infoclass = int(self.get_argument(call, "FileInformationClass"), 10)
@@ -508,14 +531,16 @@ class Summary:
             cmdline = self.get_argument(call, "CommandLine", strip=True)
             if cmdline and cmdline not in self.executed_commands:
                 self.executed_commands.append(cmdline)
-        elif call["api"] == "ShellExecuteExW":
-            path = self.get_argument(call, "FilePath", strip=True)
-            params = self.get_argument(call, "Parameters", strip=True)
-            cmdline = None
-            if path:
-                cmdline = path + " " + params
-            if cmdline and cmdline not in self.executed_commands:
-                self.executed_commands.append(cmdline)
+
+        elif call["api"] == "LdrGetProcedureAddress" and call["status"]:
+            dllname = self.get_argument(call, "ModuleName").lower()
+            funcname = self.get_argument(call, "FunctionName")
+            if not funcname:
+                funcname = "#" + str(self.get_argument(call, "Ordinal"))
+            combined = dllname + "." + funcname
+            if combined not in self.resolved_apis:
+                self.resolved_apis.append(combined)
+
         elif call["api"].startswith("NtCreateProcess"):
             cmdline = self.get_argument(call, "FileName")
             if cmdline and cmdline not in self.executed_commands:
@@ -573,7 +598,7 @@ class Summary:
         """Get registry keys, mutexes and files.
         @return: Summary of keys, read keys, written keys, mutexes and files.
         """
-        return {"files": self.files, "read_files" : self.read_files, "write_files" : self.write_files, "delete_files" : self.delete_files, "keys": self.keys, "read_keys": self.read_keys, "write_keys": self.write_keys, "delete_keys" : self.delete_keys, "executed_commands" : self.executed_commands, "mutexes": self.mutexes, "created_services" : self.created_services, "started_services" : self.started_services }
+        return {"files": self.files, "read_files" : self.read_files, "write_files" : self.write_files, "delete_files" : self.delete_files, "keys": self.keys, "read_keys": self.read_keys, "write_keys": self.write_keys, "delete_keys" : self.delete_keys, "executed_commands" : self.executed_commands, "resolved_apis" : self.resolved_apis, "mutexes": self.mutexes, "created_services" : self.created_services, "started_services" : self.started_services }
 
 class Enhanced(object):
     """Generates a more extensive high-level representation than Summary."""

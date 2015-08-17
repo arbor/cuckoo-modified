@@ -1,4 +1,4 @@
-# Copyright (C) 2010-2015 Cuckoo Foundation, Accuvant, Inc. (bspengler@accuvant.com)
+# Copyright (C) 2010-2015 Cuckoo Foundation, Optiv, Inc. (brad.spengler@optiv.com)
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
@@ -13,19 +13,20 @@ import hashlib
 import xmlrpclib
 import traceback
 import subprocess
-from ctypes import create_unicode_buffer, create_string_buffer
-from ctypes import c_wchar_p, byref, c_int, sizeof
+from ctypes import create_unicode_buffer, create_string_buffer, POINTER
+from ctypes import c_wchar_p, byref, c_int, sizeof, cast, c_void_p, c_ulong
 from threading import Lock, Thread
 from datetime import datetime, timedelta
 
 from lib.api.process import Process
 from lib.common.abstracts import Package, Auxiliary
 from lib.common.constants import PATHS, PIPE, SHUTDOWN_MUTEX, TERMINATE_EVENT
-from lib.common.defines import KERNEL32
+from lib.common.defines import KERNEL32, NTDLL
 from lib.common.defines import ERROR_MORE_DATA, ERROR_PIPE_CONNECTED
 from lib.common.defines import PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE
 from lib.common.defines import PIPE_READMODE_MESSAGE, PIPE_WAIT
 from lib.common.defines import PIPE_UNLIMITED_INSTANCES, INVALID_HANDLE_VALUE
+from lib.common.defines import SYSTEM_PROCESS_INFORMATION
 from lib.common.defines import EVENT_MODIFY_STATE
 from lib.common.exceptions import CuckooError, CuckooPackageError
 from lib.common.hashing import hash_file
@@ -53,6 +54,7 @@ LASTINJECT_TIME = None
 
 PID = os.getpid()
 PPID = Process(pid=PID).get_parent_pid()
+HIDE_PIDS = None
 
 def in_protected_path(fname):
     """Checks file name against some protected names."""
@@ -122,8 +124,7 @@ def dump_file(file_path):
 
     if os.path.isdir(file_path):
         return
-    name = os.path.basename(file_path)
-    file_name = name[name.find(u":")+1:]
+    file_name = os.path.basename(file_path)
     if duplicate:
         idx = DUMPED_LIST.index(sha256)
         upload_path = UPLOADPATH_LIST[idx]
@@ -142,15 +143,24 @@ def dump_file(file_path):
 
 
 def del_file(fname):
-    dump_file(fname)
+
+    deleted_idxes = []
 
     # Filenames are case-insensitive in windows.
-    fnames = [x.lower() for x in FILES_LIST]
+    fnamelower = fname.lower()
+
+    # we only dump files during deletion that we were previously aware of
+    for idx, name in enumerate(FILES_LIST):
+        namelower = name.lower()
+        # dump streams associated with the file too
+        if namelower == fnamelower or (namelower.startswith(fnamelower) and namelower[len(fnamelower)] == ':'):
+            dump_file(name)
+            deleted_idxes.append(idx)
 
     # If this filename exists in the FILES_LIST, then delete it, because it
     # doesn't exist anymore anyway.
-    if fname.lower() in fnames:
-        FILES_LIST.pop(fnames.index(fname.lower()))
+    for idx in deleted_idxes:
+        FILES_LIST.pop(idx)
 
 def move_file(old_fname, new_fname):
     # Filenames are case-insensitive in windows.
@@ -175,6 +185,9 @@ def move_file(old_fname, new_fname):
                replacepath = new_fname
            else:
                replacepath = new_fname + u"\\"
+        elif fname.startswith(lower_old_fname + u":"):
+            matchpath = lower_old_fname + u":"
+            replacepath = new_fname + u":"
 
         if matchpath:
             # Replace the old filename by the new filename, or replace the subdirectory if moved
@@ -248,29 +261,10 @@ class PipeHandler(Thread):
                 # In case of GETPIDS we're gonna return the current process ID
                 # and the process ID of our parent process (agent.py).
                 elif command == "GETPIDS":
-                    response = struct.pack("II", PID, PPID)
-
-                # When analyzing we don't want to hook all functions, as we're
-                # having some stability issues with regards to webbrowsers.
-                elif command == "HOOKDLLS":
-                    is_url = Config(cfg="analysis.conf").category != "file"
-
-                    url_dlls = "ntdll", "kernel32"
-
-                    def hookdll_encode(names):
-                        # We have to encode each dll name as unicode string
-                        # with length 16.
-                        names = [name + "\x00" * (16-len(name)) for name in names]
-                        f = lambda s: "".join(ch + "\x00" for ch in s)
-                        return "".join(f(name) for name in names)
-
-                    # If this sample is not a URL, then we don't want to limit
-                    # any API hooks (at least for now), so we write a null-byte
-                    # which indicates that all DLLs should be hooked.
-                    if not is_url:
-                        response = "\x00"
-                    else:
-                        response = hookdll_encode(url_dlls)
+                    hidepids = set()
+                    hidepids.update(HIDE_PIDS)
+                    hidepids.update([PID, PPID])
+                    response = struct.pack("%dI" % len(hidepids), *hidepids)
 
                 # remove pid from process list because we received a notification
                 # from kernel land
@@ -342,6 +336,17 @@ class PipeHandler(Thread):
                 elif command.startswith("RESUME:"):
                     LASTINJECT_TIME = datetime.now()
 
+                # Handle attempted shutdowns/restarts -- flush logs for all monitored processes
+                # additional handling can be added later
+                elif command.startswith("SHUTDOWN:"):
+                    PROCESS_LOCK.acquire()
+                    for process_id in PROCESS_LIST:
+                        event_name = TERMINATE_EVENT + str(process_id)
+                        event_handle = KERNEL32.OpenEventA(EVENT_MODIFY_STATE, False, event_name)
+                        if event_handle:
+                            KERNEL32.SetEvent(event_handle)
+                            KERNEL32.CloseHandle(event_handle)
+                    PROCESS_LOCK.release()
                 # Handle case of malware terminating a process -- notify the target
                 # ahead of time so that it can flush its log buffer
                 elif command.startswith("KILL:"):
@@ -542,35 +547,34 @@ class Analyzer:
         self.config = None
         self.target = None
 
-    def pid_from_process_name(self, procname):
-        # tasklist sometimes fails under high-load (http://support.microsoft.com/kb/2732840)
-        # We can retry a few times to hopefully work around failures
-        retries = 4
-        while retries > 0: 
-            stdin, stdout, stderr = os.popen3("tasklist /V /FI \"IMAGENAME eq {0}\"".format(procname))
-            s = stdout.read()
-            err = stderr.read()
-            if procname not in s:
-                log.warning('tasklist failed with error "%s"' % (err))
-            else:
-                # it worked
-                break
-            retries -= 1
+    def pids_from_process_name_list(self, namelist):
+        proclist = []
+        pidlist = []
+        buf = create_string_buffer(1024 * 1024)
+        p = cast(buf, c_void_p)
+        retlen = c_ulong(0)
+        retval = NTDLL.NtQuerySystemInformation(5, buf, 1024 * 1024, byref(retlen))
+        if retval:
+           return []
+        proc = cast(p, POINTER(SYSTEM_PROCESS_INFORMATION)).contents
+        while proc.NextEntryOffset:
+            p.value += proc.NextEntryOffset
+            proc = cast(p, POINTER(SYSTEM_PROCESS_INFORMATION)).contents
+            proclist.append((proc.ImageName.Buffer[:proc.ImageName.Length/2], proc.UniqueProcessId))
 
-
-        if procname not in s:
-            # All attempts failed
-            log.error("Unable to retreive {0} PID".format(procname))
-            return None
-        else:
-            procnameidx = s.index(procname)
-            procnamestr = s[procnameidx + len(procname):].strip()
-            return int(procnamestr[:procnamestr.index(' ')], 10)
+        for proc in proclist:
+            lowerproc = proc[0].lower()
+            for name in namelist:
+                if lowerproc == name:
+                    pidlist.append(proc[1])
+                    break
+        return pidlist
 
     def prepare(self):
         """Prepare env for analysis."""
         global DEFAULT_DLL
         global SERVICES_PID
+        global HIDE_PIDS
 
         # Get SeDebugPrivilege for the Python process. It will be needed in
         # order to perform the injections.
@@ -607,7 +611,33 @@ class Analyzer:
         DEFAULT_DLL = self.config.get_options().get("dll")
 
         # get PID for services.exe for monitoring services
-        SERVICES_PID = self.pid_from_process_name("services.exe")
+        svcpid = self.pids_from_process_name_list(["services.exe"])
+        if svcpid:
+            SERVICES_PID = svcpid[0]
+
+        protected_procname_list = [
+            "vmwareuser.exe",
+            "vmwareservice.exe",
+            "vboxservice.exe",
+            "vboxtray.exe",
+            "sandboxiedcomlaunch.exe",
+            "sandboxierpcss.exe",
+            "procmon.exe",
+            "regmon.exe",
+            "filemon.exe",
+            "wireshark.exe",
+            "netmon.exe",
+            "prl_tools_service.exe",
+            "prl_tools.exe",
+            "prl_cc.exe",
+            "sharedintapp.exe",
+            "vmtoolsd.exe",
+            "vmsrvc.exe",
+            "python.exe",
+            "perl.exe",
+        ]
+
+        HIDE_PIDS = set(self.pids_from_process_name_list(protected_procname_list))
 
         # Initialize and start the Pipe Servers. This is going to be used for
         # communicating with the injected and monitored processes.
@@ -722,14 +752,11 @@ class Analyzer:
             except (NotImplementedError, AttributeError):
                 log.warning("Auxiliary module %s was not implemented",
                             module.__name__)
-                continue
             except Exception as e:
                 log.warning("Cannot execute auxiliary module %s: %s",
                             module.__name__, e)
-                continue
-            finally:
-                log.debug("Started auxiliary module %s",
-                          module.__name__)
+            else:
+                log.debug("Started auxiliary module %s", module.__name__)
                 aux_enabled.append(aux)
 
         # Start analysis package. If for any reason, the execution of the
@@ -773,6 +800,8 @@ class Analyzer:
         if kernel_analysis != False:
             kernel_analysis = True
 
+        emptytime = None
+
         while True:
             time_counter += 1
             if time_counter == int(self.config.timeout):
@@ -799,9 +828,14 @@ class Analyzer:
                         # If none of the monitored processes are still alive, we
                         # can terminate the analysis.
                         if not PROCESS_LIST and (not LASTINJECT_TIME or (datetime.now() >= (LASTINJECT_TIME + timedelta(seconds=15)))):
-                            log.info("Process list is empty, "
-                                    "terminating analysis.")
-                            break
+                            if emptytime and (datetime.now() >= (emptytime + timedelta(seconds=5))):
+                                log.info("Process list is empty, "
+                                        "terminating analysis.")
+                                break
+                            elif not emptytime:
+                                emptytime = datetime.now()
+                        else:
+                            emptytime = None
 
                     # Update the list of monitored processes available to the
                     # analysis package. It could be used for internal
@@ -853,6 +887,16 @@ class Analyzer:
                 log.warning("Cannot terminate auxiliary module %s: %s",
                             aux.__class__.__name__, e)
 
+        # Tell all processes to flush their logs regardless of terminate_processes setting
+        if not kernel_analysis:
+            for pid in PROCESS_LIST:
+                proc = Process(pid=pid)
+                if proc.is_alive():
+                    try:
+                        proc.set_terminate_event()
+                    except:
+                        continue
+
         if self.config.terminate_processes:
             # Try to terminate remaining active processes. We do this to make sure
             # that we clean up remaining open handles (sockets, files, etc.).
@@ -866,7 +910,6 @@ class Analyzer:
                             if not proc.is_critical():
                                 proc.terminate()
                             else:
-                                proc.set_terminate_event()
                                 log.info("Not terminating critical process with pid %d.", proc.pid)
                         except:
                             continue

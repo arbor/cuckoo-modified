@@ -1,13 +1,19 @@
-# Copyright (C) 2010-2015 Cuckoo Foundation.
+# Copyright (C) 2010-2015 Cuckoo Foundation, Optiv, Inc. (brad.spengler@optiv.com)
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
 import json
 import lib.cuckoo.common.office.olefile as olefile
 import lib.cuckoo.common.office.vbadeobf as vbadeobf
+import lib.cuckoo.common.decoders.darkcomet as darkcomet
+import lib.cuckoo.common.decoders.njrat as njrat
 import logging
 import os
+import math
+import array
 import base64
+import hashlib
+from datetime import datetime, timedelta
 
 from lib.cuckoo.common.icon import PEGroupIconDir
 from PIL import Image
@@ -56,6 +62,34 @@ from lib.cuckoo.common.peepdf.JSAnalysis import analyseJS
 
 log = logging.getLogger(__name__)
 
+
+# Obtained from
+# https://github.com/erocarrera/pefile/blob/master/pefile.py
+# Copyright Ero Carrera and released under the MIT License:
+# https://github.com/erocarrera/pefile/blob/master/LICENSE
+
+def _get_entropy(data):
+    """ Computes the entropy value for the provided data
+    @param data: data to be analyzed.
+    @return: entropy value as float.
+    """
+    entropy = 0.0
+
+    if len(data) == 0:
+        return entropy
+
+    occurrences = array.array('L', [0]*256)
+
+    for x in data:
+        occurrences[ord(x)] += 1
+
+    for x in occurrences:
+        if x:
+            p_x = float(x) / len(data)
+            entropy -= p_x*math.log(p_x, 2)
+
+    return entropy
+
 # Partially taken from
 # http://malwarecookbook.googlecode.com/svn/trunk/3/8/pescanner.py
 
@@ -87,11 +121,17 @@ def _get_filetype(data):
 class PortableExecutable:
     """PE analysis."""
 
-    def __init__(self, file_path):
+    def __init__(self, file_path, results):
         """@param file_path: file path."""
         self.file_path = file_path
         self.pe = None
+        self.results = results
 
+    def add_statistic(self, name, field, value):
+        self.results["statistics"]["processing"].append({
+            "name": name,
+            field: value,
+        })
 
     def _get_peid_signatures(self):
         """Gets PEID signatures.
@@ -107,6 +147,27 @@ class PortableExecutable:
             return signatures.match_all(self.pe, ep_only=True)
         except:
             return None
+
+    def _get_pdb_path(self):
+        if not self.pe:
+            return None
+
+        try:
+            for dbg in self.pe.DIRECTORY_ENTRY_DEBUG:
+                dbgst = dbg.struct
+                dbgdata = self.pe.__data__[dbgst.PointerToRawData:dbgst.PointerToRawData+dbgst.SizeOfData]
+                if dbgst.Type == 4: #MISC
+                    datatype, length, uniflag = struct.unpack_from("IIB", dbgdata)
+                    return str(dbgdata[12:length]).rstrip('\0')
+                elif dbgst.Type == 2: #CODEVIEW
+                    if dbgdata[:4] == "RSDS":
+                        return str(dbgdata[24:]).rstrip('\0')
+                    elif dbgdata[:4] == "NB10":
+                        return str(dbgdata[16:]).rstrip('\0')
+        except:
+            pass
+
+        return None
 
     def _get_imported_symbols(self):
         """Gets imported symbols.
@@ -136,9 +197,20 @@ class PortableExecutable:
 
         return imports
 
+    def _get_exported_dll_name(self):
+        """Gets exported DLL name, if any
+        @return: exported DLL name as string or None.
+        """
+        if not self.pe:
+            return None
+
+        if hasattr(self.pe, "DIRECTORY_ENTRY_EXPORT"):
+            return convert_to_printable(self.pe.get_string_at_rva(self.pe.DIRECTORY_ENTRY_EXPORT.struct.Name))
+        return None
+
     def _get_exported_symbols(self):
         """Gets exported symbols.
-        @return: exported symbols dict or None.
+        @return: list of dicts of exported symbols or None.
         """
         if not self.pe:
             return None
@@ -150,7 +222,7 @@ class PortableExecutable:
                 symbol = {}
                 symbol["address"] = hex(self.pe.OPTIONAL_HEADER.ImageBase +
                                         exported_symbol.address)
-                symbol["name"] = exported_symbol.name
+                symbol["name"] = convert_to_printable(exported_symbol.name)
                 symbol["ordinal"] = exported_symbol.ordinal
                 exports.append(symbol)
 
@@ -263,6 +335,15 @@ class PortableExecutable:
 
         return "0x{0:08x}".format(self.pe.OPTIONAL_HEADER.ImageBase + self.pe.OPTIONAL_HEADER.AddressOfEntryPoint)
 
+    def _get_osversion(self):
+        """Get minimum required OS version for PE to execute
+        @return: minimum OS version or None.
+        """
+        if not self.pe:
+            return None
+
+        return "{0}.{1}".format(self.pe.OPTIONAL_HEADER.MajorOperatingSystemVersion, self.pe.OPTIONAL_HEADER.MinorOperatingSystemVersion)
+
     def _get_resources(self):
         """Get resources.
         @return: resources dict or None.
@@ -290,25 +371,25 @@ class PortableExecutable:
                                     filetype = _get_filetype(data)
                                     language = pefile.LANG.get(resource_lang.data.lang, None)
                                     sublanguage = pefile.get_sublang_name_for_lang(resource_lang.data.lang, resource_lang.data.sublang)
-
                                     resource["name"] = name
                                     resource["offset"] = "0x{0:08x}".format(resource_lang.data.struct.OffsetToData)
                                     resource["size"] = "0x{0:08x}".format(resource_lang.data.struct.Size)
                                     resource["filetype"] = filetype
                                     resource["language"] = language
                                     resource["sublanguage"] = sublanguage
+                                    resource["entropy"] = "{0:.02f}".format(float(_get_entropy(data)))
                                     resources.append(resource)
                 except:
                     continue
 
         return resources
 
-    def _get_icon(self):
-        """Get icon in PNG format.
-        @return: image data in PNG format, encoded as base64
+    def _get_icon_info(self):
+        """Get icon in PNG format and information for searching for similar icons
+        @return: tuple of (image data in PNG format encoded as base64, md5 hash of image data, md5 hash of "simplified" image for fuzzy matching)
         """
         if not self.pe:
-            return None
+            return None, None, None
 
         try:
             rt_group_icon_idx = [entry.id for entry in self.pe.DIRECTORY_ENTRY_RESOURCE.entries].index(pefile.RESOURCE_TYPE['RT_GROUP_ICON'])
@@ -340,13 +421,28 @@ class PortableExecutable:
 
                     strio = StringIO()
                     output = StringIO()
+
                     strio.write(icon)
                     strio.seek(0)
                     img = Image.open(strio)
                     img.save(output, format="PNG")
-                    return base64.b64encode(output.getvalue())
+
+                    img = img.resize((8,8), Image.BILINEAR)
+                    img = img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=2).convert("L")
+                    lowval = img.getextrema()[0]
+                    img = img.point(lambda i: 255 if i > lowval else 0)
+                    img = img.convert("1")
+                    simplified = bytearray(img.getdata())
+
+                    m = hashlib.md5()
+                    m.update(output.getvalue())
+                    fullhash = m.hexdigest()
+                    m = hashlib.md5()
+                    m.update(simplified)
+                    simphash = m.hexdigest()
+                    return base64.b64encode(output.getvalue()), fullhash, simphash
         except:
-            return None
+            return None, None, None
 
     def _get_versioninfo(self):
         """Get version info.
@@ -366,6 +462,8 @@ class PortableExecutable:
                                     entry = {}
                                     entry["name"] = convert_to_printable(str_entry[0])
                                     entry["value"] = convert_to_printable(str_entry[1])
+                                    if entry["name"] == "Translation" and len(entry["value"]) == 10:
+                                        entry["value"] = "0x0" + entry["value"][2:5] + " 0x0" + entry["value"][7:10]
                                     infos.append(entry)
                         elif hasattr(entry, "Var"):
                             for var_entry in entry.Var:
@@ -373,6 +471,8 @@ class PortableExecutable:
                                     entry = {}
                                     entry["name"] = convert_to_printable(var_entry.entry.keys()[0])
                                     entry["value"] = convert_to_printable(var_entry.entry.values()[0])
+                                    if entry["name"] == "Translation" and len(entry["value"]) == 10:
+                                        entry["value"] = "0x0" + entry["value"][2:5] + " 0x0" + entry["value"][7:10]
                                     infos.append(entry)
                     except:
                         continue
@@ -406,6 +506,40 @@ class PortableExecutable:
 
         return datetime.fromtimestamp(pe_timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
+    def _get_digital_signers(self):
+        if not self.pe:
+            return None
+
+        retlist = None
+
+        if HAVE_CRYPTO:
+            address = self.pe.OPTIONAL_HEADER.DATA_DIRECTORY[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_SECURITY']].VirtualAddress
+
+            #check if file is digitally signed
+            if address == 0:
+                return retlist
+
+            signature = self.pe.write()[address+8:]
+            bio = BIO.MemoryBuffer(signature)
+
+            if bio:
+                swig_pkcs7 = m2.pkcs7_read_bio_der(bio.bio_ptr())
+
+                if swig_pkcs7:
+                    p7 = SMIME.PKCS7(swig_pkcs7)
+                    xst = p7.get0_signers(X509.X509_Stack())
+                    retlist = []
+                    if xst:
+                        for cert in xst:
+                            sn = cert.get_serial_number()
+                            sha1_fingerprint = cert.get_fingerprint('sha1').lower()
+                            md5_fingerprint = cert.get_fingerprint('md5').lower()
+                            subject_str = str(cert.get_subject())
+                            cn = subject_str[subject_str.index("/CN=")+len("/CN="):]
+                            retlist.append({"sn":str(sn), "cn":cn, "sha1_fingerprint" : sha1_fingerprint, "md5_fingerprint" : md5_fingerprint })
+
+        return retlist
+
     def run(self):
         """Run analysis.
         @return: analysis results dict or None.
@@ -419,46 +553,42 @@ class PortableExecutable:
             return None
 
         results = {}
+
+        pretime = datetime.now()
         results["peid_signatures"] = self._get_peid_signatures()
+        posttime = datetime.now()
+        timediff = posttime - pretime
+        self.add_statistic("peid", "time", float("%d.%03d" % (timediff.seconds, timediff.microseconds / 1000)))
+
         results["pe_imagebase"] = self._get_imagebase()
         results["pe_entrypoint"] = self._get_entrypoint()
+        results["pe_osversion"] = self._get_osversion()
+        results["pe_pdbpath"] = self._get_pdb_path()
         results["pe_imports"] = self._get_imported_symbols()
+        results["pe_exported_dll_name"] = self._get_exported_dll_name()
         results["pe_exports"] = self._get_exported_symbols()
         results["pe_dirents"] = self._get_directory_entries()
         results["pe_sections"] = self._get_sections()
         results["pe_overlay"] = self._get_overlay()
         results["pe_resources"] = self._get_resources()
-        results["pe_icon"] = self._get_icon()
+        results["pe_icon"], results["pe_icon_hash"], results["pe_icon_fuzzy"] = self._get_icon_info()
         results["pe_versioninfo"] = self._get_versioninfo()
         results["pe_imphash"] = self._get_imphash()
         results["pe_timestamp"] = self._get_timestamp()
+        results["digital_signers"] = self._get_digital_signers()
         results["imported_dll_count"] = len([x for x in results["pe_imports"] if x.get("dll")])
 
-        if HAVE_CRYPTO:
-            address = self.pe.OPTIONAL_HEADER.DATA_DIRECTORY[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_SECURITY']].VirtualAddress
-
-            #check if file is digitally signed
-            if address == 0:
-                return results
-
-            signature = self.pe.write()[address+8:]
-            bio = BIO.MemoryBuffer(signature)
-
-            if bio:
-                swig_pkcs7 = m2.pkcs7_read_bio_der(bio.bio_ptr())
-
-                if swig_pkcs7:
-                    p7 = SMIME.PKCS7(swig_pkcs7)
-                    xst = p7.get0_signers(X509.X509_Stack())
-                    results["digital_signers"] = []
-                    if xst:
-                        for cert in xst:
-                            sn = cert.get_serial_number()
-                            sha1_fingerprint = cert.get_fingerprint('sha1').lower()
-                            md5_fingerprint = cert.get_fingerprint('md5').lower()
-                            subject_str = str(cert.get_subject())
-                            cn = subject_str[subject_str.index("/CN=")+len("/CN="):]
-                            results["digital_signers"].append({"sn":str(sn), "cn":cn, "sha1_fingerprint" : sha1_fingerprint, "md5_fingerprint" : md5_fingerprint })
+        
+        pretime = datetime.now()
+        darkcomet_config = darkcomet.extract_config(self.file_path, self.pe)
+        if darkcomet_config:
+            results["darkcomet_config"] = darkcomet_config
+        njrat_config = njrat.extract_config(self.file_path)
+        if njrat_config:
+            results["njrat_config"] = njrat_config
+        posttime = datetime.now()
+        timediff = posttime - pretime
+        self.add_statistic("config_decoder", "time", float("%d.%03d" % (timediff.seconds, timediff.microseconds / 1000)))
 
         return results
 
@@ -719,8 +849,8 @@ class Static(Processing):
 
         if self.task["category"] == "file":
             thetype = File(self.file_path).get_type()
-            if HAVE_PEFILE and ("PE32" in thetype or thetype == "MS-DOS executable"):
-                static = PortableExecutable(self.file_path).run()
+            if HAVE_PEFILE and ("PE32" in thetype or "MS-DOS executable" in thetype):
+                static = PortableExecutable(self.file_path, self.results).run()
             elif "PDF" in thetype:
                 static = PDF(self.file_path).run()
             elif "Word 2007" in thetype or "Excel 2007" in thetype or "PowerPoint 2007" in thetype:

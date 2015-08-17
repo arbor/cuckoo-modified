@@ -1,4 +1,4 @@
-# Copyright (C) 2010-2015 Cuckoo Foundation, Accuvant, Inc. (bspengler@accuvant.com)
+# Copyright (C) 2010-2015 Cuckoo Foundation, Optiv, Inc. (brad.spengler@optiv.com)
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
@@ -7,11 +7,14 @@ import logging
 import random
 import subprocess
 import platform
+import urllib
+import base64
 from time import time
 from ctypes import byref, c_ulong, create_string_buffer, c_int, sizeof
 from shutil import copy
 
 from lib.common.constants import PIPE, PATHS, SHUTDOWN_MUTEX, TERMINATE_EVENT
+from lib.common.defines import ULONG_PTR
 from lib.common.defines import KERNEL32, NTDLL, SYSTEM_INFO, STILL_ACTIVE
 from lib.common.defines import THREAD_ALL_ACCESS, PROCESS_ALL_ACCESS, TH32CS_SNAPPROCESS
 from lib.common.defines import STARTUPINFO, PROCESS_INFORMATION, PROCESSENTRY32
@@ -36,18 +39,34 @@ log = logging.getLogger(__name__)
 def is_os_64bit():
     return platform.machine().endswith('64')
 
-def randomize_dll(dll_path):
-    """Randomize DLL name.
-    @return: new DLL path.
+def randomize_bin(bin_path, ext):
+    """Randomize binary name.
+    @return: new binary path.
     """
-    new_dll_name = random_string(6)
-    new_dll_path = os.path.join(os.getcwd(), "dll", "{0}.dll".format(new_dll_name))
+    new_bin_name = random_string(6)
+    new_bin_path = os.path.join(os.getcwd(), ext, "{0}.{1}".format(new_bin_name, ext))
 
     try:
-        copy(dll_path, new_dll_path)
-        return new_dll_path
+        copy(bin_path, new_bin_path)
+        return new_bin_path
     except:
-        return dll_path
+        return bin_path
+
+def get_referrer_url(interest):
+    """Get a Google referrer URL
+    @return: URL to be added to the analysis config
+    """
+
+    if "://" not in interest:
+        return ""
+
+    escapedurl = urllib.quote(interest, '')
+    itemidx = str(random.randint(1, 30))
+    vedstr = "0CCEQfj" + base64.urlsafe_b64encode(random_string(random.randint(5, 8) * 3))
+    eistr = base64.urlsafe_b64encode(random_string(12))
+    usgstr = "AFQj" + base64.urlsafe_b64encode(random_string(12))
+    referrer = "http://www.google.com/url?sa=t&rct=j&q=&esrc=s&source=web&cd={0}&ved={1}&url={2}&ei={3}&usg={4}".format(itemidx, vedstr, escapedurl, eistr, usgstr)
+    return referrer
 
 class Process:
     """Windows process."""
@@ -193,8 +212,8 @@ class Process:
 
         NT_SUCCESS = lambda val: val >= 0
 
-        pbi = (c_int * 6)()
-        size = c_int()
+        pbi = (ULONG_PTR * 6)()
+        size = c_ulong()
 
         # Set return value to signed 32bit integer.
         NTDLL.NtQueryInformationProcess.restype = c_int
@@ -407,8 +426,6 @@ class Process:
         if self.h_process == 0:
             self.open()
 
-        self.set_terminate_event()
-
         if KERNEL32.TerminateProcess(self.h_process, 1):
             log.info("Successfully terminated process with pid %d.", self.pid)
             return True
@@ -516,7 +533,7 @@ class Process:
             else:
                 dll = "cuckoomon.dll"
 
-        dll = randomize_dll(os.path.join("dll", dll))
+        dll = randomize_bin(os.path.join("dll", dll), "dll")
 
         if not dll or not os.path.exists(dll):
             log.warning("No valid DLL specified to be injected in process "
@@ -552,7 +569,8 @@ class Process:
                 config.write("full-logs={0}\n".format(cfgoptions["full-logs"]))
             if "no-stealth" in cfgoptions:
                 config.write("no-stealth={0}\n".format(cfgoptions["no-stealth"]))
-
+            if "norefer" not in cfgoptions:
+                config.write("referrer={0}\n".format(get_referrer_url(interest)))
             if firstproc:
                 Process.first_process = False
 
@@ -561,14 +579,16 @@ class Process:
         else:
             log.debug("Using CreateRemoteThread injection.")
 
-        bin_name = ""
+        orig_bin_name = ""
         bit_str = ""
         if is_64bit:
-            bin_name = "bin/loader_x64.exe"
+            orig_bin_name = "loader_x64.exe"
             bit_str = "64-bit"
         else:
-            bin_name = "bin/loader.exe"
+            orig_bin_name = "loader.exe"
             bit_str = "32-bit"
+
+        bin_name = randomize_bin(os.path.join("bin", orig_bin_name), "exe")
 
         if os.path.exists(bin_name):
             ret = subprocess.call([bin_name, "inject", str(self.pid), str(thread_id), dll])
@@ -624,12 +644,16 @@ class Process:
         buf = infd.read(1024*1024)
         try:
             while buf:
-                nf.send(buf, retry=False)
+                nf.send(buf, retry=True)
                 buf = infd.read(1024*1024)
-            nf.close()
         except:
+            infd.close()
+            nf.close()
             log.warning("Memory dump of process with pid %d failed", self.pid)
             return False
+
+        infd.close()
+        nf.close()
 
         log.info("Memory dump of process with pid %d completed", self.pid)
 

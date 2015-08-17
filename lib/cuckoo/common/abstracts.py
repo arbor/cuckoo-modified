@@ -1,4 +1,4 @@
-# Copyright (C) 2010-2015 Cuckoo Foundation, Accuvant, Inc. (bspengler@accuvant.com).
+# Copyright (C) 2010-2015 Cuckoo Foundation, Optiv, Inc. (brad.spengler@optiv.com).
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
@@ -150,7 +150,7 @@ class Machinery(object):
                                     resultserver_port=port)
             except (AttributeError, CuckooOperationalError) as e:
                 log.warning("Configuration details about machine %s "
-                            "are missing: %s", machine_id, e)
+                            "are missing: %s", machine.id, e)
                 continue
 
     def _initialize_check(self):
@@ -641,6 +641,12 @@ class Processing(object):
         self.pmemory_path = os.path.join(self.analysis_path, "memory")
         self.memory_path = os.path.join(self.analysis_path, "memory.dmp")
 
+    def add_statistic(self, name, field, value):
+        if name not in self.results["statistics"]["processing"]:
+            self.results["statistics"]["processing"][name] = { }
+
+        self.results["statistics"]["processing"][name][field] = value
+
     def run(self):
         """Start processing.
         @raise NotImplementedError: this method is abstract.
@@ -683,6 +689,12 @@ class Signature(object):
         self._current_call_dict = None
         self._current_call_raw_cache = None
         self._current_call_raw_dict = None
+
+    def add_statistic(self, name, field, value):
+        if name not in self.results["statistics"]["signatures"]:
+            self.results["statistics"]["signatures"][name] = { }
+
+        self.results["statistics"]["signatures"][name][field] = value
 
     def _check_value(self, pattern, subject, regex=False, all=False, ignorecase=True):
         """Checks a pattern against a given subject.
@@ -1154,6 +1166,27 @@ class Signature(object):
             return retset
 
         return None
+
+    def get_initial_process(self):
+        """ Obtains the initial process information
+        @return: dict containing initial process information or None
+        """
+
+        if not "behavior" in self.results or not "processes" in self.results["behavior"] or not len(self.results["behavior"]["processes"]):
+            return None
+
+        return self.results["behavior"]["processes"][0]
+
+    def get_environ_entry(self, proc, env_name):
+        """ Obtains environment entry from process
+        @param proc: Process to inspect
+        @param env_name: Name of environment entry
+        @return: value of environment entry or None
+        """
+        if not proc or not "environ" in proc or not env_name in proc["environ"]:
+            return None
+
+        return proc["environ"][env_name]
 
     def get_argument(self, call, name):
         """Retrieves the value of a specific argument from an API call.

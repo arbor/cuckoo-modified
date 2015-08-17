@@ -116,6 +116,18 @@
             {% endif %}
         </div>
         <div class="well well-small">
+            <b>Resolved APIs</b>
+            {% if results.behavior.summary.resolved_apis %}
+                <ul>
+                    {% for api in results.behavior.summary.resolved_apis %}
+                    <li><span class="mono">{{api}}</span></li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                Nothing to display.
+            {% endif %}
+        </div>
+        <div class="well well-small">
             <b>Executed Commands</b>
             {% if results.behavior.summary.executed_commands %}
                 <ul>
@@ -189,6 +201,7 @@
         <span class="badge network" style="color: black;">network</span>
         <span class="badge synchronization" style="color: black;">synchronization</span>
         <span class="badge crypto" style="color: black;">crypto</span>
+        <span class="badge browser" style="color: black;">browser</span>
     </p>
     {% if results.behavior and results.behavior.processes %}
         {% for process in results.behavior.processes %}
@@ -213,7 +226,7 @@
                         <td style="word-wrap: break-word;">
                         {% for argument in call.arguments %}
                             {% if argument.pretty_value %}
-                                {{argument.name}} => <span class="mono">{{argument.pretty_value}}</span><br />
+                                {{argument.name}} => <span class="mono" title="{{argument.value}}">{{argument.pretty_value}}</span><br />
                             {% else %}
                                 {{argument.name}} => <span class="mono">{{argument.value}}</span><br />
                             {% endif %}
@@ -221,9 +234,9 @@
                         </td>
                         <td>{% if call.status %}SUCCESS{% else %}FAILURE{% endif %}</td>
                         {% if call.pretty_return %}
-                            <td style="word-wrap: break-word;">{{call.pretty_return}}</td>
+                            <td style="word-wrap: break-word;"><span class="mono" title="{{call.return}}">{{call.pretty_return}}</span></td>
                         {% else %}
-                            <td>{{call.return}}</td>
+                            <td><span class="mono"{{call.return}}</span></td>
                         {% endif %}
                         <td>
                         {% if call.repeated and call.repeated > 0 %}

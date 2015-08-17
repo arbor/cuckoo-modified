@@ -23,7 +23,6 @@ from lib.cuckoo.common.objects import File
 from lib.cuckoo.common.utils import create_folder
 from lib.cuckoo.core.database import Database, TASK_COMPLETED, TASK_REPORTED
 from lib.cuckoo.core.database import TASK_FAILED_ANALYSIS
-from lib.cuckoo.core.database import ANALYSIS_STARTED, ANALYSIS_FINISHED
 from lib.cuckoo.core.guest import GuestManager
 from lib.cuckoo.core.plugins import list_plugins, RunAuxiliary, RunProcessing
 from lib.cuckoo.core.plugins import RunSignatures, RunReporting, GetFeeds
@@ -75,6 +74,7 @@ class AnalysisManager(Thread):
         self.storage = ""
         self.binary = ""
         self.machine = None
+        self.db = Database()
 
     def init_storage(self):
         """Initialize analysis storage folder."""
@@ -102,7 +102,7 @@ class AnalysisManager(Thread):
 
     def check_file(self):
         """Checks the integrity of the file to be analyzed."""
-        sample = Database().view_sample(self.task.sample_id)
+        sample = self.db.view_sample(self.task.sample_id)
 
         sha256 = File(self.task.target).get_sha256()
         if sha256 != sample.sha256:
@@ -164,16 +164,14 @@ class AnalysisManager(Thread):
 
             # If the user specified a specific machine ID, a platform to be
             # used or machine tags acquire the machine accordingly.
-            try:
-                machine = machinery.acquire(machine_id=self.task.machine,
-                                            platform=self.task.platform,
-                                            tags=self.task.tags)
-            finally:
-                machine_lock.release()
+            machine = machinery.acquire(machine_id=self.task.machine,
+                                        platform=self.task.platform,
+                                        tags=self.task.tags)
 
             # If no machine is available at this moment, wait for one second
             # and try again.
             if not machine:
+                machine_lock.release()
                 log.debug("Task #%d: no machine available yet", self.task.id)
                 time.sleep(1)
             else:
@@ -211,7 +209,7 @@ class AnalysisManager(Thread):
             # if it's a PE file, collect export information to use in more smartly determining the right
             # package to use
             options["exports"] = ""
-            if HAVE_PEFILE and ("PE32" in options["file_type"] or options["file_type"] == "MS-DOS executable"):
+            if HAVE_PEFILE and ("PE32" in options["file_type"] or "MS-DOS executable" in options["file_type"]):
                 try:
                     pe = pefile.PE(self.task.target)
                     if hasattr(pe, "DIRECTORY_ENTRY_EXPORT"):
@@ -250,16 +248,15 @@ class AnalysisManager(Thread):
         try:
             self.acquire_machine()
         except CuckooOperationalError as e:
+            machine_lock.release()
             log.error("Cannot acquire machine: {0}".format(e))
             return False
 
-        Database().set_statistics_time(self.task.id, ANALYSIS_STARTED)
         # Generate the analysis configuration file.
         options = self.build_options()
 
         # At this point we can tell the ResultServer about it.
         try:
-            Database().recruit_machine(self.task.id, self.machine.id)
             ResultServer().add_task(self.task, self.machine)
         except Exception as e:
             machinery.release(self.machine.label)
@@ -269,13 +266,20 @@ class AnalysisManager(Thread):
         aux.start()
 
         try:
+            unlocked = False
+
             # Mark the selected analysis machine in the database as started.
-            guest_log = Database().guest_start(self.task.id,
-                                               self.machine.name,
-                                               self.machine.label,
-                                               machinery.__class__.__name__)
+            guest_log = self.db.guest_start(self.task.id,
+                                            self.machine.name,
+                                            self.machine.label,
+                                            machinery.__class__.__name__)
             # Start the machine.
             machinery.start(self.machine.label)
+
+            # By the time start returns it will have fully started the Virtual
+            # Machine. We can now safely release the machine lock.
+            machine_lock.release()
+            unlocked = True
 
             # Initialize the guest manager.
             guest = GuestManager(self.machine.name, self.machine.ip,
@@ -287,9 +291,13 @@ class AnalysisManager(Thread):
             guest.wait_for_completion()
             succeeded = True
         except CuckooMachineError as e:
+            if not unlocked:
+                machine_lock.release()
             log.error(str(e), extra={"task_id": self.task.id})
             dead_machine = True
         except CuckooGuestError as e:
+            if not unlocked:
+                machine_lock.release()
             log.error(str(e), extra={"task_id": self.task.id})
         finally:
             # Stop Auxiliary modules.
@@ -316,7 +324,7 @@ class AnalysisManager(Thread):
             # Mark the machine in the database as stopped. Unless this machine
             # has been marked as dead, we just keep it as "started" in the
             # database so it'll not be used later on in this session.
-            Database().guest_stop(guest_log)
+            self.db.guest_stop(guest_log)
 
             # After all this, we can make the ResultServer forget about the
             # internal state for this analysis task.
@@ -326,7 +334,7 @@ class AnalysisManager(Thread):
                 # Remove the guest from the database, so that we can assign a
                 # new guest when the task is being analyzed with another
                 # machine.
-                Database().guest_remove(guest_log)
+                self.db.guest_remove(guest_log)
 
                 # Remove the analysis directory that has been created so
                 # far, as launch_analysis() is going to be doing that again.
@@ -345,7 +353,6 @@ class AnalysisManager(Thread):
                 log.error("Unable to release machine %s, reason %s. "
                           "You might need to restore it manually.",
                           self.machine.label, e)
-        Database().set_statistics_time(self.task.id, ANALYSIS_FINISHED)
 
         return succeeded
 
@@ -357,10 +364,14 @@ class AnalysisManager(Thread):
         # module available. Its structure can be observed through the JSON
         # dump in the analysis' reports folder. (If jsondump is enabled.)
         results = { }
+        results["statistics"] = { }
+        results["statistics"]["processing"] = list()
+        results["statistics"]["signatures"] = list()
+        results["statistics"]["reporting"] = list()
         GetFeeds(results=results).run()
-        RunProcessing(task_id=self.task.id, results=results).run()
-        RunSignatures(task_id=self.task.id, results=results).run()
-        RunReporting(task_id=self.task.id, results=results).run()
+        RunProcessing(task=self.task.to_dict(), results=results).run()
+        RunSignatures(task=self.task.to_dict(), results=results).run()
+        RunReporting(task=self.task.to_dict(), results=results).run()
 
         # If the target is a file and the user enabled the option,
         # delete the original copy.
@@ -404,14 +415,20 @@ class AnalysisManager(Thread):
 
                 break
 
-            Database().set_status(self.task.id, TASK_COMPLETED)
+            self.db.set_status(self.task.id, TASK_COMPLETED)
+
+            # If the task is still available in the database, update our task
+            # variable with what's in the database, as otherwise we're missing
+            # out on the status and completed_on change. This would then in
+            # turn thrown an exception in the analysisinfo processing module.
+            self.task = self.db.view_task(self.task.id) or self.task
 
             log.debug("Released database task #%d with status %s",
                       self.task.id, success)
 
             if self.cfg.cuckoo.process_results:
                 self.process_results()
-                Database().set_status(self.task.id, TASK_REPORTED)
+                self.db.set_status(self.task.id, TASK_REPORTED)
 
             # We make a symbolic link ("latest") which links to the latest
             # analysis - this is useful for debugging purposes. This is only
@@ -425,7 +442,9 @@ class AnalysisManager(Thread):
                 # Deal with race conditions using a lock.
                 latest_symlink_lock.acquire()
                 try:
-                    if os.path.exists(latest):
+                    # As per documentation, lexists() returns True for dead
+                    # symbolic links.
+                    if os.path.lexists(latest):
                         os.remove(latest)
 
                     os.symlink(self.storage, latest)
@@ -532,6 +551,16 @@ class Scheduler:
         while self.running:
             time.sleep(1)
 
+            # Wait until the machine lock is not locked. This is only the case
+            # when all machines are fully running, rather that about to start
+            # or still busy starting. This way we won't have race conditions
+            # with finding out there are no available machines in the analysis
+            # manager or having two analyses pick the same machine.
+            if not machine_lock.acquire(False):
+                continue
+
+            machine_lock.release()
+
             # If not enough free disk space is available, then we print an
             # error message and wait another round (this check is ignored
             # when the freespace configuration variable is set to zero).
@@ -582,6 +611,7 @@ class Scheduler:
                         # Initialize and start the analysis manager.
                         analysis = AnalysisManager(task, errors)
                         analysis.start()
+                        break
 
             # Deal with errors.
             try:

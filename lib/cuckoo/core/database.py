@@ -13,10 +13,11 @@ from lib.cuckoo.common.exceptions import CuckooDatabaseError
 from lib.cuckoo.common.exceptions import CuckooOperationalError
 from lib.cuckoo.common.exceptions import CuckooDependencyError
 from lib.cuckoo.common.objects import File, URL
-from lib.cuckoo.common.utils import create_folder, demux_sample, Singleton, classlock, SuperLock
+from lib.cuckoo.common.utils import create_folder, Singleton, classlock, SuperLock
+from lib.cuckoo.common.demux import demux_sample
 
 try:
-    from sqlalchemy import create_engine, Column
+    from sqlalchemy import create_engine, Column, event
     from sqlalchemy import Integer, String, Boolean, DateTime, Enum
     from sqlalchemy import ForeignKey, Text, Index, Table
     from sqlalchemy.ext.declarative import declarative_base
@@ -38,31 +39,6 @@ TASK_REPORTED = "reported"
 TASK_FAILED_ANALYSIS = "failed_analysis"
 TASK_FAILED_PROCESSING = "failed_processing"
 TASK_FAILED_REPORTING = "failed_reporting"
-
-ANALYSIS_STARTED = "analysis_started"
-ANALYSIS_FINISHED = "analysis_finished"
-PROCESSING_STARTED = "processing_started"
-PROCESSING_FINISHED = "processing_finished"
-SIGNATURES_STARTED = "signatures_started"
-SIGNATURES_FINISHED = "signatures_finished"
-REPORTING_STARTED = "reporting_started"
-REPORTING_FINISHED = "reporting_finished"
-
-DROPPED_FILES = "dropped_files"
-RUNNING_PROCESSES = "running_processes"
-API_CALLS = "api_calls"
-ACCESSED_DOMAINS = "accessed_domains"
-SIGNATURES_TOTAL = "signatures_total"
-SIGNATURES_ALERT = "signatures_alert"
-FILES_WRITTEN = "files_written"
-REGISTRY_KEYS_MODIFIED = "registry_keys_modified"
-
-TASK_ISSUE_NONE = "no_issue"
-TASK_ISSUE_SHORT_API_CALL_LIST = "short_api_call_list"
-TASK_ISSUE_CRASH = "crash_issue"
-TASK_ISSUE_ANTI = "anti_issue"
-TASK_ISSUE_PERFECT = "no_issue_perfect_results"
-TASK_TIMEDOUT = "task_analysis_timedout"
 
 # Secondary table used in association Machine - Tag.
 machines_tags = Table(
@@ -87,8 +63,7 @@ class Machine(Base):
     label = Column(String(255), nullable=False)
     ip = Column(String(255), nullable=False)
     platform = Column(String(255), nullable=False)
-    tags = relationship("Tag", secondary=machines_tags, cascade="all, delete",
-                        single_parent=True, backref=backref("machine", cascade="all"))
+    tags = relationship("Tag", secondary=machines_tags, backref="machines")
     interface = Column(String(255), nullable=True)
     snapshot = Column(String(255), nullable=True)
     locked = Column(Boolean(), nullable=False, default=False)
@@ -280,9 +255,7 @@ class Task(Base):
     custom = Column(String(255), nullable=True)
     machine = Column(String(255), nullable=True)
     package = Column(String(255), nullable=True)
-    tags = relationship("Tag", secondary=tasks_tags, cascade="all, delete",
-                        single_parent=True, backref=backref("task", cascade="all"),
-                        lazy="subquery")
+    tags = relationship("Tag", secondary=tasks_tags, backref="tasks", lazy="subquery")
     options = Column(String(255), nullable=True)
     platform = Column(String(255), nullable=True)
     memory = Column(Boolean, nullable=False, default=False)
@@ -376,12 +349,12 @@ class Database(object):
         @param schema_check: disable or enable the db schema version check
         """
         self._lock = SuperLock()
-        cfg = Config()
+        self.cfg = Config()
 
         if dsn:
             self._connect_database(dsn)
-        elif cfg.database.connection:
-            self._connect_database(cfg.database.connection)
+        elif self.cfg.database.connection:
+            self._connect_database(self.cfg.database.connection)
         else:
             db_file = os.path.join(CUCKOO_ROOT, "db", "cuckoo.db")
             if not os.path.exists(db_file):
@@ -397,8 +370,8 @@ class Database(object):
         # Disable SQL logging. Turn it on for debugging.
         self.engine.echo = False
         # Connection timeout.
-        if cfg.database.timeout:
-            self.engine.pool_timeout = cfg.database.timeout
+        if self.cfg.database.timeout:
+            self.engine.pool_timeout = self.cfg.database.timeout
         else:
             self.engine.pool_timeout = 60
         # Create schema.
@@ -409,6 +382,10 @@ class Database(object):
 
         # Get db session.
         self.Session = sessionmaker(bind=self.engine)
+
+        @event.listens_for(self.Session, 'after_flush')
+        def delete_tag_orphans(session, ctx):
+            session.query(Tag).filter(~Tag.tasks.any()).filter(~Tag.machines.any()).delete(synchronize_session=False)
 
         # Deal with schema versioning.
         # TODO: it's a little bit dirty, needs refactoring.
@@ -544,6 +521,10 @@ class Database(object):
         session = self.Session()
         try:
             row = session.query(Task).get(task_id)
+
+            if not row:
+                return
+
             row.status = status
 
             if status == TASK_RUNNING:
@@ -554,81 +535,6 @@ class Database(object):
             session.commit()
         except SQLAlchemyError as e:
             log.debug("Database error setting status: {0}".format(e))
-            session.rollback()
-        finally:
-            session.close()
-
-    @classlock
-    def set_statistics_time(self, task_id, event):
-        """Set task statistics time.
-        @param task_id: task identifier
-        @param event: event time to set
-        """
-        session = self.Session()
-        try:
-            row = session.query(Task).get(task_id)
-
-            if event == ANALYSIS_STARTED:
-                row.analysis_started_on = datetime.now()
-            elif event == ANALYSIS_FINISHED:
-                row.analysis_finished_on = datetime.now()
-            elif event == PROCESSING_STARTED:
-                row.processing_started_on = datetime.now()
-            elif event == PROCESSING_FINISHED:
-                row.processing_finished_on = datetime.now()
-            elif event == SIGNATURES_STARTED:
-                row.signatures_started_on = datetime.now()
-            elif event == SIGNATURES_FINISHED:
-                row.signatures_finished_on = datetime.now()
-            elif event == REPORTING_STARTED:
-                row.reporting_started_on = datetime.now()
-            elif event == REPORTING_FINISHED:
-                row.reporting_finished_on = datetime.now()
-
-            session.commit()
-        except SQLAlchemyError as e:
-            log.debug("Database error setting time statistics: {0}".format(e))
-            session.rollback()
-        finally:
-            session.close()
-
-    @classlock
-    def set_statistics_counter(self, task_id, event, value):
-        """Set task statistics counter.
-        @param task_id: task identifier
-        @param event: event time to set
-        @param value: counter value
-        """
-        session = self.Session()
-        try:
-            row = session.query(Task).get(task_id)
-
-            if event == DROPPED_FILES:
-                row.dropped_files = value
-            elif event == RUNNING_PROCESSES:
-                row.running_processes = value
-            elif event == API_CALLS:
-                row.api_calls = value
-            elif event == ACCESSED_DOMAINS:
-                row.domains = value
-            elif event == SIGNATURES_TOTAL:
-                row.signatures_total = value
-            elif event == SIGNATURES_ALERT:
-                row.signatures_alert = value
-            elif event == FILES_WRITTEN:
-                row.files_written = value
-            elif event == TASK_ISSUE_CRASH:
-                row.crash_issues = value
-            elif event == TASK_ISSUE_ANTI:
-                row.anti_issues = value
-            elif event == REGISTRY_KEYS_MODIFIED:
-                row.registry_keys_modified = value
-            elif event == TASK_TIMEDOUT:
-                row.timedout = value
-
-            session.commit()
-        except SQLAlchemyError as e:
-            log.debug("Database error setting time statistics: {0}".format(e))
             session.rollback()
         finally:
             session.close()
@@ -821,34 +727,6 @@ class Database(object):
         return machine
 
     @classlock
-    def recruit_machine(self, task_id, machine_id):
-        """Add a machine to a task
-        @param task_id: ID of the task to add
-        @param machine_id: ID of the machine to add
-        """
-
-        session = self.Session()
-        try:
-            #import pdb; pdb.set_trace()
-            task = session.query(Task).filter(Task.id == task_id).first()
-        except SQLAlchemyError as e:
-            log.debug("Database error recruiting machine: {0}".format(e))
-            session.close()
-            return None
-
-        if task:
-            task.machine_id = machine_id
-            try:
-                session.commit()
-                session.refresh(task)
-            except SQLAlchemyError as e:
-                log.debug("Database error recruiting machine: {0}".format(e))
-                session.rollback()
-                return None
-            finally:
-                session.close()
-
-    @classlock
     def count_machines_available(self):
         """How many virtual machines are ready for analysis.
         @return: free virtual machines count
@@ -1017,12 +895,13 @@ class Database(object):
             else:
                 task.clock = clock
         elif isinstance(obj, File):
-            cfg = Config()
             try:
-                clocktime = datetime.now() + timedelta(days=cfg.cuckoo.daydelta)
+                clocktime = datetime.now() + timedelta(days=self.cfg.cuckoo.daydelta)
                 task.clock = clocktime
             except:
                 pass
+        else:
+            task.clock = datetime.now()
 
         session.add(task)
 
@@ -1078,7 +957,7 @@ class Database(object):
         """
         task_ids = []
         # extract files from the (potential) ZIP
-        extracted_files = demux_sample(file_path)
+        extracted_files = demux_sample(file_path, package, options)
         # create tasks for each file in the ZIP
         for file in extracted_files:
             task_id = self.add_path(file_path=file,
@@ -1252,99 +1131,6 @@ class Database(object):
             return 0
         finally:
             session.close()
-
-    @classlock
-    def task_duration(self, stage="full", year=None, month=None, day=None):
-        """Get durations of tasks in the database
-
-        @param stage: processing stage to process for
-        @param year: year filter
-        @param month: month filter
-        @param day: day filter
-        @return: a list containing the durations
-        """
-
-        session = self.Session()
-        res = []
-        try:
-            alltasks = session.query(Task)
-            for i in alltasks:
-                if stage == "full":
-                    if i.completed_on and i.added_on:
-                        res.append(int((i.completed_on - i.added_on).total_seconds()))
-                elif stage == "analysis":
-                    if i.analysis_started_on and i.analysis_finished_on:
-                        res.append(int((i.analysis_finished_on - i.analysis_started_on).total_seconds()))
-                elif stage == "processing":
-                    if i.processing_finished_on and i.processing_started_on:
-                        res.append(int((i.processing_finished_on - i.processing_started_on).total_seconds()))
-                elif stage == "signatures":
-                    if i.signatures_started_on and i.signatures_finished_on:
-                        res.append(int((i.signatures_finished_on - i.signatures_started_on).total_seconds()))
-                elif stage == "reporting":
-                    if i.reporting_finished_on and i.reporting_started_on:
-                        res.append(int((i.reporting_finished_on - i.reporting_started_on).total_seconds()))
-
-        except SQLAlchemyError as e:
-            log.debug("Database error counting tasks: {0}".format(e))
-            return []
-        finally:
-            session.close()
-        return res
-
-    @classlock
-    def task_analysis_issues(self, issue, mid=None, ftype=None):
-        """Return number of tasks with specific analysis issues
-
-        @param issue: Issue to filter for
-        @param mid: Machine id to filter for
-        @param ftype: File type to filter for
-        @return: number of tasks with the specific issue
-        """
-
-        api_call_limit = 50   # Number of api calls, we accept as success.
-
-        session = self.Session()
-        res = 0
-        try:
-            unfiltered = session.query(Task)
-
-            if not mid is None:
-                unfiltered = unfiltered.filter(Task.machine_id == mid)
-            if not ftype is None:
-                unfiltered = unfiltered.filter(Task.sample_id == Sample.id).filter(Sample.file_type == ftype)
-
-            # any alert signature marks it as success:
-            if issue != TASK_ISSUE_NONE and issue != TASK_ISSUE_PERFECT:
-                unfiltered = unfiltered.filter(Task.signatures_alert == 0)
-
-            if issue == TASK_TIMEDOUT:
-                unfiltered = unfiltered.filter(Task.timedout == True)
-
-            elif issue == TASK_ISSUE_SHORT_API_CALL_LIST:
-                unfiltered = unfiltered.filter(Task.api_calls <= api_call_limit)
-
-            elif issue == TASK_ISSUE_CRASH:
-                unfiltered = unfiltered.filter(Task.crash_issues > 0)
-
-            elif issue == TASK_ISSUE_ANTI:
-                unfiltered = unfiltered.filter(Task.anti_issues > 0)
-
-            elif issue == TASK_ISSUE_PERFECT:
-                unfiltered = unfiltered.filter(Task.api_calls > api_call_limit).filter(Task.crash_issues == 0)
-                unfiltered = unfiltered.filter(Task.anti_issues == 0).filter(Task.signatures_alert > 0)
-
-            elif issue == TASK_ISSUE_NONE:
-                unfiltered = unfiltered.filter(Task.api_calls > api_call_limit).filter(Task.crash_issues == 0)
-                unfiltered = unfiltered.filter(Task.anti_issues == 0).filter(Task.signatures_alert == 0)
-            res = unfiltered.count()
-
-        except SQLAlchemyError as e:
-            log.debug("Database error counting tasks: {0}".format(e))
-            return 0
-        finally:
-            session.close()
-        return res
 
     @classlock
     def view_task(self, task_id, details=False):

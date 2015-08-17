@@ -1,4 +1,4 @@
-# Copyright (C) 2015 Accuvant, Inc. (bspengler@accuvant.com)
+# Copyright (C) 2015 Optiv, Inc. (brad.spengler@optiv.com)
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
@@ -52,6 +52,18 @@ def sanitize_url(url):
 def mist_convert(results):
     """ Performs conversion of analysis results to MIST format """
     lines = []
+
+    if results["target"]["category"] == "file":
+        lines.append("# FILE")
+        lines.append("# MD5: " + results["target"]["file"]["md5"])
+        lines.append("# SHA1: " + results["target"]["file"]["sha1"])
+        lines.append("# SHA256: " + results["target"]["file"]["sha256"])
+    elif results["target"]["category"] == "url":
+        lines.append("# URL")
+        lines.append("# MD5: " + hashlib.md5(results["target"]["url"]).hexdigest())
+        lines.append("# SHA1: " + hashlib.sha1(results["target"]["url"]).hexdigest())
+        lines.append("# SHA256: " + hashlib.sha256(results["target"]["url"]).hexdigest())
+
     if "behavior" in results and "summary" in results["behavior"]:
         for entry in results["behavior"]["summary"]["files"]:
             lines.append("file access|" + sanitize_file(entry))
@@ -71,6 +83,8 @@ def mist_convert(results):
             lines.append("reg delete|" + sanitize_reg(entry))
         for entry in results["behavior"]["summary"]["executed_commands"]:
             lines.append("cmd exec|" + sanitize_cmd(entry))
+        for entry in results["behavior"]["summary"]["resolved_apis"]:
+            lines.append("api resolv|" + sanitize_generic(entry))
         for entry in results["behavior"]["summary"]["mutexes"]:
             lines.append("mutex access|" + sanitize_generic(entry))
         for entry in results["behavior"]["summary"]["created_services"]:
@@ -80,17 +94,23 @@ def mist_convert(results):
     if "signatures" in results:
         for entry in results["signatures"]:
             sigline = "sig " + entry["name"] + "|"
+            notadded = False
             if entry["data"]:
                 for res in entry["data"]:
                     for key, value in res.items():
-                        lowerval = value.lower()
-                        if lowerval.startswith("hkey"):
-                            lines.append(sigline + sanitize_reg(value))
-                        elif lowerval.startswith("c:"):
-                            lines.append(sigline + sanitize_file(value))
+                        if isinstance(value, basestring):
+                            lowerval = value.lower()
+                            if lowerval.startswith("hkey"):
+                                lines.append(sigline + sanitize_reg(value))
+                            elif lowerval.startswith("c:"):
+                                lines.append(sigline + sanitize_file(value))
+                            else:
+                                lines.append(sigline + sanitize_generic(value))
                         else:
-                            lines.append(sigline + sanitize_generic(value))
+                            notadded = True
             else:
+                notadded = True
+            if notadded:
                 lines.append(sigline)
     if "network" in results:
         hosts = results["network"].get("hosts")
@@ -111,23 +131,27 @@ def mist_convert(results):
             lines.append("file drop|" + "%08x" % (int(dropped["size"]) & 0xfffffc00) + " " + sanitize_generic(dropped["type"]))
 
     if "static" in results:
-        if "digital_signers" in results["static"]:
+        if "digital_signers" in results["static"] and results["static"]["digital_signers"]:
             for info in results["static"]["digital_signers"]:
                 lines.append("pe sign|" + sanitize_generic(info["cn"]) + " " + sanitize_generic(info["md5_fingerprint"]))
-        if "pe_imphash" in results["static"]:
+        if "pe_imphash" in results["static"] and results["static"]["pe_imphash"]:
             lines.append("pe imphash|" + sanitize_generic(results["static"]["pe_imphash"]))
-        if "pe_icon" in results["static"]:
-            if results["static"]["pe_icon"]:
-                lines.append("pe icon|" + sanitize_generic(results["static"]["pe_icon"]))
-        if "pe_versioninfo" in results["static"]:
+        if "pe_icon" in results["static"] and results["static"]["pe_icon"]:
+            lines.append("pe icon|" + sanitize_generic(results["static"]["pe_icon"]))
+        if "pe_icon_fuzzy" in results["static"] and results["static"]["pe_icon_fuzzy"]:
+            lines.append("pe iconfuzzy|" + sanitize_generic(results["static"]["pe_icon_fuzzy"]))
+        if "pe_versioninfo" in results["static"] and results["static"]["pe_versioninfo"]:
             for info in results["static"]["pe_versioninfo"]:
                 if info["value"]:
                     lines.append("pe ver|" + sanitize_generic(info["name"]) + " " + sanitize_generic(info["value"]))
-        if "pe_sections" in results["static"]:
+        if "pe_sections" in results["static"] and results["static"]["pe_sections"]:
             for section in results["static"]["pe_sections"]:
                 lines.append("pe section|" + sanitize_generic(section["name"]) + " " + "%02x" % int(float(section["entropy"])))
 
-    return "\n".join(lines)
+    if len(lines) <= 4:
+        return ""
+
+    return "\n".join(lines) + "\n"
 
 class Malheur(Report):
     """ Performs classification on the generated MIST reports """
@@ -146,19 +170,16 @@ class Malheur(Report):
             pass
 
         mist = mist_convert(results)
-        with open(os.path.join(reportsdir, task_id + ".txt"), "w") as outfile:
-            outfile.write(mist)
+        if mist:
+            with open(os.path.join(reportsdir, task_id + ".txt"), "w") as outfile:
+                outfile.write(mist)
 
         # might need to prevent concurrent modifications to internal state of malheur by only allowing
         # one analysis to be running malheur at a time
 
         path, dirs, files = os.walk(reportsdir).next()
         try:
-            if len(files) == 1:
-                # if this is the first file being analyzed, reset Malheur's internal state
-                subprocess.call(["malheur", "--input.format", "mist", "--input.mist_level", "2", "-r", "-o", outputfile, "increment", reportsdir])
-            else:
-                subprocess.call(["malheur", "--input.format", "mist", "--input.mist_level", "2", "-o", outputfile, "increment", reportsdir])
+            subprocess.call(["malheur", "--input.format", "mist", "--input.mist_level", "2", "--cluster.reject_num", "2", "-o", outputfile, "cluster", reportsdir])
 
             # replace previous classification state with new results atomically
             os.rename(outputfile, outputfile[:-33])

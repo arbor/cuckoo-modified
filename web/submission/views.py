@@ -15,8 +15,10 @@ from django.template import RequestContext
 
 sys.path.append(settings.CUCKOO_PATH)
 
-from lib.cuckoo.core.database import Database
+from lib.cuckoo.common.config import Config
 from lib.cuckoo.common.utils import store_temp_file
+from lib.cuckoo.common.quarantine import unquarantine
+from lib.cuckoo.core.database import Database
 
 def force_int(value):
     try:
@@ -106,6 +108,37 @@ def index(request):
                     task_ids_new = db.demux_sample_and_add_to_db(file_path=path, package=package, timeout=timeout, options=options, priority=priority,
                                                                  machine=entry, custom=custom, memory=memory, enforce_timeout=enforce_timeout, tags=tags, clock=clock)
                     task_ids.extend(task_ids_new)
+        elif "quarantine" in request.FILES:
+            for sample in request.FILES.getlist("quarantine"):
+                if sample.size == 0:
+                    return render_to_response("error.html",
+                                              {"error": "You uploaded an empty quarantine file."},
+                                              context_instance=RequestContext(request))
+                elif sample.size > settings.MAX_UPLOAD_SIZE:
+                    return render_to_response("error.html",
+                                              {"error": "You uploaded a quarantine file that exceeds that maximum allowed upload size."},
+                                              context_instance=RequestContext(request))
+    
+                # Moving sample from django temporary file to Cuckoo temporary storage to
+                # let it persist between reboot (if user like to configure it in that way).
+                tmp_path = store_temp_file(sample.read(),
+                                       sample.name)
+
+                path = unquarantine(tmp_path)
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+
+                if not path:
+                    return render_to_response("error.html",
+                                              {"error": "You uploaded an unsupported quarantine file."},
+                                              context_instance=RequestContext(request))
+
+                for entry in task_machines:
+                    task_ids_new = db.demux_sample_and_add_to_db(file_path=path, package=package, timeout=timeout, options=options, priority=priority,
+                                                                 machine=entry, custom=custom, memory=memory, enforce_timeout=enforce_timeout, tags=tags, clock=clock)
+                    task_ids.extend(task_ids_new)
         elif "url" in request.POST and request.POST.get("url").strip():
             url = request.POST.get("url").strip()
             if not url:
@@ -113,6 +146,7 @@ def index(request):
                                           {"error": "You specified an invalid URL!"},
                                           context_instance=RequestContext(request))
 
+            url = url.replace("hxxps://", "https://").replace("hxxp://", "http://").replace("[.]", ".")
             for entry in task_machines:
                 task_id = db.add_url(url=url,
                                      package=package,
@@ -197,6 +231,26 @@ def index(request):
                                       {"error": "Error adding task to Cuckoo's database."},
                                       context_instance=RequestContext(request))
     else:
+        enabledconf = dict()
+        enabledconf["vt"] = settings.VTDL_ENABLED
+        enabledconf["kernel"] = settings.OPT_ZER0M0N
+        enabledconf["memory"] = Config("processing").memory.get("enabled")
+        enabledconf["procmemory"] = Config("processing").procmemory.get("enabled")
+        enabledconf["tor"] = Config("auxiliary").tor.get("enabled")
+        if Config("auxiliary").gateways:
+            enabledconf["gateways"] = True
+        else:
+            enabledconf["gateways"] = False
+        enabledconf["tags"] = False
+        # Get enabled machinery
+        machinery = Config("cuckoo").cuckoo.get("machinery")
+        # Get VM names for machinery config elements
+        vms = [x.strip() for x in getattr(Config(machinery), machinery).get("machines").split(",")]
+        # Check each VM config element for tags
+        for vmtag in vms:
+            if "tags" in getattr(Config(machinery), vmtag).keys():
+                enabledconf["tags"] = True
+
         files = os.listdir(os.path.join(settings.CUCKOO_PATH, "analyzer", "windows", "modules", "packages"))
 
         packages = []
@@ -229,7 +283,7 @@ def index(request):
                                   {"packages": sorted(packages),
                                    "machines": machines,
                                    "gateways": settings.GATEWAYS,
-                                   "vtdlenabled": settings.VTDL_ENABLED},
+                                   "config": enabledconf},
                                   context_instance=RequestContext(request))
 
 def status(request, task_id):

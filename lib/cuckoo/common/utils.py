@@ -1,4 +1,4 @@
-# Copyright (C) 2010-2015 Cuckoo Foundation, Accuvant, Inc. (bspengler@accuvant.com)
+# Copyright (C) 2010-2015 Cuckoo Foundation, Optiv, Inc. (brad.spengler@optiv.com)
 # This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
 # See the file 'docs/LICENSE' for copying permission.
 
@@ -13,10 +13,17 @@ import errno
 import inspect
 import threading
 import multiprocessing
+import operator
 from datetime import datetime
+from collections import defaultdict
 
 from lib.cuckoo.common.exceptions import CuckooOperationalError
 from lib.cuckoo.common.config import Config
+
+try:
+    import re2 as re
+except ImportError:
+    import re
 
 try:
     import chardet
@@ -141,6 +148,7 @@ def pretty_print_retval(category, api_name, status, retval):
         return None
     return {
             0x00000103 : "NO_MORE_ITEMS",
+            0x00002af9 : "WSAHOST_NOT_FOUND",
             0x80000005 : "BUFFER_OVERFLOW",
             0x80000006 : "NO_MORE_FILES",
             0xc0000001 : "UNSUCCESSFUL",
@@ -163,6 +171,8 @@ def pretty_print_retval(category, api_name, status, retval):
             0xc000003a : "OBJECT_PATH_NOT_FOUND",
             0xc000003c : "DATA_OVERRUN",
             0xc0000043 : "SHARING_VIOLATION",
+            0xc0000045 : "INVALID_PAGE_PROTECTION",
+            0xc000007a : "PROCEDURE_NOT_FOUND",
             0xc00000ba : "FILE_IS_A_DIRECTORY",
             0xc000010a : "PROCESS_IS_TERMINATING",
             0xc0000121 : "CANNOT_DELETE",
@@ -238,6 +248,9 @@ def pretty_print_arg(category, api_name, arg_name, arg_val):
                 0x8002 : "MD4",
                 0x8003 : "MD5",
                 0x8004 : "SHA1",
+                0x800c : "SHA_256",
+                0x800d : "SHA_384",
+                0x800e : "SHA_512",
                 0x8005 : "MAC",
                 0x8009 : "HMAC",
                 0x2400 : "RSA Public Key Signature",
@@ -245,9 +258,26 @@ def pretty_print_arg(category, api_name, arg_name, arg_val):
                 0xa400 : "RSA Public Key Exchange",
                 0x6602 : "RC2",
                 0x6801 : "RC4",
+                0x660d : "RC5",
                 0x6601 : "DES",
                 0x6603 : "3DES",
-                0x6609 : "Two-key 3DES"
+                0x6604 : "DESX",
+                0x6609 : "Two-key 3DES",
+                0x6611 : "AES",
+                0x660e : "AES_128",
+                0x660f : "AES_192",
+                0x6610 : "AES_256",
+                0xaa03 : "AGREEDKEY_ANY",
+                0x660c : "CYLINK_MEK",
+                0xaa02 : "DH_EPHEM",
+                0xaa01 : "DH_SF",
+                0x2200 : "DSS_SIGN",
+                0xaa05 : "ECDH",
+                0x2203 : "ECDSA",
+                0xa001 : "ECMQV",
+                0x800b : "HASH_REPLACE_OWF",
+                0xa003 : "HUGHES_MD5",
+                0x2000 : "NO_SIGN",
         }.get(val, None)
     elif api_name == "SHGetFolderPathW" and arg_name == "Folder":
         val = int(arg_val, 16)
@@ -984,6 +1014,69 @@ def pretty_print_arg(category, api_name, arg_name, arg_val):
         if val:
             res.append("0x{0:08x}".format(val))
         return "|".join(res)
+    elif api_name == "CoInternetSetFeatureEnabled" and arg_name == "FeatureEntry":
+        val = int(arg_val, 10)
+        return {
+              0 : "FEATURE_OBJECT_CACHING",
+              1 : "FEATURE_ZONE_ELEVATION",
+              2 : "FEATURE_MIME_HANDLING",
+              3 : "FEATURE_MIME_SNIFFING",
+              4 : "FEATURE_WINDOW_RESTRICTIONS",
+              5 : "FEATURE_WEBOC_POPUPMANAGEMENT",
+              6 : "FEATURE_BEHAVIORS",
+              7 : "FEATURE_DISABLE_MK_PROTOCOL",
+              8 : "FEATURE_LOCALMACHINE_LOCKDOWN",
+              9 : "FEATURE_SECURITYBAND",
+              10 : "FEATURE_RESTRICT_ACTIVEXINSTALL",
+              11 : "FEATURE_VALIDATE_NAVIGATE_URL",
+              12 : "FEATURE_RESTRICT_FILEDOWNLOAD",
+              13 : "FEATURE_ADDON_MANAGEMENT",
+              14 : "FEATURE_PROTOCOL_LOCKDOWN",
+              15 : "FEATURE_HTTP_USERNAME_PASSWORD_DISABLE",
+              16 : "FEATURE_SAFE_BINDTOOBJECT",
+              17 : "FEATURE_UNC_SAVEDFILECHECK",
+              18 : "FEATURE_GET_URL_DOM_FILEPATH_UNENCODED",
+              19 : "FEATURE_TABBED_BROWSING",
+              20 : "FEATURE_SSLUX",
+              21 : "FEATURE_DISABLE_NAVIGATION_SOUNDS",
+              22 : "FEATURE_DISABLE_LEGACY_COMPRESSION",
+              23 : "FEATURE_FORCE_ADDR_AND_STATUS",
+              24 : "FEATURE_XMLHTTP",
+              25 : "FEATURE_DISABLE_TELNET_PROTOCOL",
+              26 : "FEATURE_FEEDS",
+              27 : "FEATURE_BLOCK_INPUT_PROMPTS"
+        }.get(val, None)
+    elif api_name == "CoInternetSetFeatureEnabled" and arg_name == "Flags":
+        val = int(arg_val, 16)
+        res = []
+        if val & 0x00000001:
+            res.append("SET_FEATURE_ON_THREAD")
+            val &= ~0x00000001
+        if val & 0x00000002:
+            res.append("SET_FEATURE_ON_PROCESS")
+            val &= ~0x00000002
+        if val & 0x00000004:
+            res.append("SET_FEATURE_IN_REGISTRY")
+            val &= ~0x00000004
+        if val & 0x00000008:
+            res.append("SET_FEATURE_ON_THREAD_LOCALMACHINE")
+            val &= ~0x00000008
+        if val & 0x00000010:
+            res.append("SET_FEATURE_ON_THREAD_INTRANET")
+            val &= ~0x00000010
+        if val & 0x00000020:
+            res.append("SET_FEATURE_ON_THREAD_TRUSTED")
+            val &= ~0x00000020
+        if val & 0x00000040:
+            res.append("SET_FEATURE_ON_THREAD_INTERNET")
+            val &= ~0x00000040
+        if val & 0x00000080:
+            res.append("SET_FEATURE_ON_THREAD_RESTRICTED")
+            val &= ~0x00000080
+        if val:
+            res.append("0x{0:08x}".format(val))
+        return "|".join(res)
+
     elif api_name == "InternetSetOptionA" and arg_name == "Option":
         val = int(arg_val, 16)
         return {
@@ -1191,7 +1284,7 @@ def store_temp_file(filedata, filename, path=None):
     @param path: optional path for temp directory.
     @return: path to the temporary file.
     """
-    filename = get_filename_from_path(filename)
+    filename = get_filename_from_path(filename).encode("utf-8", "replace")
 
     # Reduce length (100 is arbitrary).
     filename = filename[:100]
@@ -1220,13 +1313,110 @@ def store_temp_file(filedata, filename, path=None):
 
     return tmp_file_path
 
-def demux_sample(filename):
-    """
-    If file is a ZIP, extract its included files and return their file paths
-    """
-    retlist = []
-    retlist.append(filename)
-    return retlist
+def get_vt_consensus(namelist):
+    blacklist = [
+        "other",
+        "troj",
+        "trojan",
+        "win32",
+        "trojandownloader",
+        "trojandropper",
+        "dropper",
+        "generik",
+        "generic",
+        "tsgeneric",
+        "malware",
+        "dldr",
+        "downloader",
+        "injector",
+        "agent",
+        "nsis",
+        "generickd",
+        "behaveslike",
+        "heur",
+        "inject2",
+        "trojanspy",
+        "trojanpws",
+        "reputation",
+        "script",
+        "w97m",
+        "lookslike",
+        "macro",
+        "dloadr",
+        "kryptik",
+        "graftor",
+        "artemis",
+        "zbot",
+        "w2km",
+        "docdl",
+        "variant",
+        "packed",
+        "trojware",
+        "worm",
+        "genetic",
+        "backdoor",
+        "email",
+        "obfuscated",
+        "cryptor",
+        "obfus",
+        "virus",
+        "xpack",
+        "crypt",
+        "rootkit",
+        "malwares",
+        "suspicious",
+        "riskware",
+        "risk",
+        "win64",
+        "troj64",
+        "drop",
+        "hacktool",
+        "exploit",
+        "msil",
+        "inject",
+        "dropped",
+        "program",
+        "unwanted",
+        "heuristic",
+        "patcher",
+        "tool",
+        "potentially",
+        "rogue",
+        "keygen",
+        "unsafe",
+        "application",
+        "risktool",
+        "multi",
+        "ransom",
+    ]
+
+    finaltoks = defaultdict(int)
+    for name in namelist:
+        toks = re.findall(r"[A-Za-z0-9]+", name)
+        for tok in toks:
+            finaltoks[tok.title()] += 1
+    for tok in finaltoks.keys():
+        lowertok = tok.lower()
+        accepted = True
+        numlist = [x for x in tok if x.isdigit()]
+        if len(numlist) > 2 or len(tok) < 4:
+            accepted = False
+        if accepted:
+            for black in blacklist:
+                if black == lowertok:
+                    accepted = False
+                    break
+        if not accepted:
+            del finaltoks[tok]
+
+    sorted_finaltoks = sorted(finaltoks.items(), key=operator.itemgetter(1), reverse=True)
+    if len(sorted_finaltoks) == 1 and sorted_finaltoks[0][1] >= 2:
+        return sorted_finaltoks[0][0]
+    elif len(sorted_finaltoks) > 1 and (sorted_finaltoks[0][1] >= sorted_finaltoks[1][1] * 2 or sorted_finaltoks[0][1] > 8):
+        return sorted_finaltoks[0][0]
+    elif len(sorted_finaltoks) > 1 and sorted_finaltoks[0][1] == sorted_finaltoks[1][1] and sorted_finaltoks[0][1] > 2:
+        return sorted_finaltoks[0][0]
+    return ""
 
 class TimeoutServer(xmlrpclib.ServerProxy):
     """Timeout server for XMLRPC.
