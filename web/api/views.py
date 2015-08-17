@@ -1527,6 +1527,10 @@ def cuckoo_status(request):
         )
     return jsonize(resp, response=True)
 
+if apiconf.machinelist.get("enabled"):
+    raterps = apiconf.volatility.get("rps")
+    raterpm = apiconf.volatility.get("rpm")
+    rateblock = True
 @ratelimit(key="ip", rate=raterps, block=rateblock)
 @ratelimit(key="ip", rate=raterpm, block=rateblock)
 @csrf_exempt
