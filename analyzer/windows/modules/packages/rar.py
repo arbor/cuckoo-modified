@@ -113,13 +113,8 @@ class Rar(Package):
                         file_name = f.filename
                         break
                 # Default to the first one if none found
-<<<<<<< HEAD
-                file_name = file_name if file_name else zipinfos[0].filename
-                log.debug(u"Missing file option, auto executing: {0}".format(file_name))
-=======
                 file_name = file_name if file_name else rarinfos[0].filename
                 log.debug("Missing file option, auto executing: {0}".format(file_name))
->>>>>>> brad-accuvant/master
             else:
                 raise CuckooPackageError("Empty RAR archive")
 
